@@ -74,7 +74,60 @@ def save_invoice(invoice):
     finally:
         conn.close()
 
+
+def list_invoices():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.execute("""
+            SELECT
+                invoice_number,
+                total_amount_fen,
+                invoice_date,
+                seller,
+                is_printed,
+                status,
+                remark
+            FROM invoices
+            ORDER BY invoice_date DESC, invoice_number
+        """)
+        return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+def update_remark(invoice_number,remark):
+    conn = sqlite3.connect(DB_PATH)
+    
+    try:
+        cursor = conn.execute("""
+            UPDATE invoices
+            SET remark = ?
+            WHERE invoice_number = ?
+        """, (remark, invoice_number))
+
+        conn.commit()
+        return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+def update_printed(invoice_number,is_printed):
+    if type(is_printed) is not bool:
+        raise ValueError("打印状态必须是True或False")
+
+    conn  =sqlite3.connect(DB_PATH)
+    
+    try:
+        cursor = conn.execute("""
+            UPDATE invoices
+            SET is_printed = ?
+            WHERE invoice_number = ?
+        """, (int(is_printed), invoice_number))
+
+        conn.commit()
+        return cursor.rowcount == 1
+    finally:
+        conn.close()
         
 if __name__ == "__main__":
     init_db()
     print("数据库初始化完成:",DB_PATH)
+    
