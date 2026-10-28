@@ -1,9 +1,33 @@
 import tkinter as tk
-from tkinter import ttk
 from decimal import Decimal
+from tkinter import ttk,simpledialog,messagebox
 
-from database import init_db, list_invoices
+from database import init_db, list_invoices,update_remark
 
+def edit_selected_remark():
+    selected = table.selection()
+    if len(selected) !=1:
+        messagebox.showinfo("提示","请选中一张发票后修改备注")
+        return
+    
+    invoice_number = selected[0]
+    values = table.item(invoice_number,"values")
+    current_remark = values[5]
+    
+    new_remark = simpledialog.askstring(
+        "修改备注",
+        "请输入备注：",
+        initialvalue=current_remark,
+        parent=root
+    )
+    
+    if new_remark is None:
+        return
+    saved = update_remark(invoice_number,new_remark.strip())
+    if saved:
+        load_invoices()
+    else:
+        messagebox.showwarning("提示", "未找到这张发票，请刷新列表")
 
 def load_invoices():
     # 清除旧行，避免刷新时重复显示
@@ -54,6 +78,12 @@ ttk.Button(
     text="刷新列表",
     command=load_invoices,
 ).pack(side="left")
+
+ttk.Button(
+    toolbar,
+    text="修改备注",
+    command=edit_selected_remark,
+).pack(side="left",padx=(8,0))
 
 summary = tk.StringVar(value="共 0 张发票")
 ttk.Label(toolbar, textvariable=summary).pack(side="right")

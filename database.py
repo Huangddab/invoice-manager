@@ -28,6 +28,7 @@ def init_db():
     finally:
         conn.close()
 
+# 保存发票信息
 def save_invoice(invoice):
     required_fields = (
         "invoice_number",
@@ -74,7 +75,7 @@ def save_invoice(invoice):
     finally:
         conn.close()
 
-
+# 列出发票列表
 def list_invoices():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -94,6 +95,8 @@ def list_invoices():
         return [dict(row) for row in cursor.fetchall()]
     finally:
         conn.close()
+        
+# 更新发票备注
 def update_remark(invoice_number,remark):
     conn = sqlite3.connect(DB_PATH)
     
@@ -109,6 +112,7 @@ def update_remark(invoice_number,remark):
     finally:
         conn.close()
 
+# 更新发票打印状态
 def update_printed(invoice_number,is_printed):
     if type(is_printed) is not bool:
         raise ValueError("打印状态必须是True或False")
@@ -126,7 +130,29 @@ def update_printed(invoice_number,is_printed):
         return cursor.rowcount == 1
     finally:
         conn.close()
-        
+
+# 批量更新发票打印状态
+def update_printed_batch(invoice_numbers, is_printed):
+    if type(is_printed) is not bool:
+        raise ValueError("打印状态必须是True或False")
+
+    conn = sqlite3.connect(DB_PATH)
+    
+    try:
+        cursor = conn.executemany("""
+            UPDATE invoices
+            SET is_printed = ?
+            WHERE invoice_number = ?
+        """, [(int(is_printed), invoice_number) for invoice_number in invoice_numbers])
+
+        conn.commit()
+        return cursor.rowcount == len(invoice_numbers)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
 if __name__ == "__main__":
     init_db()
     print("数据库初始化完成:",DB_PATH)
