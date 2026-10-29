@@ -7,25 +7,48 @@ import sys
 import tempfile
 
 
-def tkinter_data_args():
-    """Explicitly bundle Tcl/Tk scripts even if the PyInstaller hook misses them."""
+def materialize_library(interpreter, source, destination, bootstrap=None):
+    """Export Tcl virtual libraries (for example zipfs) to ordinary build files."""
+    native = Path(source)
+    try:
+        if native.is_dir() and (bootstrap is None or (native / bootstrap).is_file()):
+            return native
+    except OSError:
+        # Windows may reject zipfs paths as invalid native filenames.
+        pass
+    probe = interpreter.call('file', 'join', source, bootstrap) if bootstrap else source
+    if not int(interpreter.call('file', 'readable', probe)):
+        raise RuntimeError(f'Tcl/Tk library is not readable: {probe}. Python: {sys.executable}')
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    interpreter.call('file', 'copy', '-force', source, str(destination))
+    if not destination.is_dir() or (bootstrap and not (destination / bootstrap).is_file()):
+        raise RuntimeError(f'Tcl/Tk library export failed: {source} -> {destination}')
+    return destination
+
+
+def tkinter_data_args(export_root):
+    """Use Tcl file operations so both native paths and embedded zipfs work."""
     import tkinter as tk
     root = tk.Tk()
     root.withdraw()
     try:
-        tcl = Path(root.tk.eval('info library'))
-        toolkit = Path(root.tk.eval('set tk_library'))
+        tcl_source = root.tk.eval('info library')
+        tk_source = root.tk.eval('set tk_library')
+        print('Tcl library:', tcl_source)
+        print('Tk library:', tk_source)
+        tcl = materialize_library(root.tk, tcl_source, Path(export_root) / 'tcl', 'init.tcl')
+        toolkit = materialize_library(root.tk, tk_source, Path(export_root) / 'tk', 'tk.tcl')
+        args = ['--add-data', str(tcl) + ';_tcl_data', '--add-data', str(toolkit) + ';_tk_data']
+        parent = root.tk.call('file', 'dirname', tcl_source)
+        for name in ('tcl8', 'tcl9'):
+            source = root.tk.call('file', 'join', parent, name)
+            if int(root.tk.call('file', 'isdirectory', source)):
+                directory = materialize_library(root.tk, str(source), Path(export_root) / name)
+                args.extend(['--add-data', str(directory) + ';' + name])
+        return args
     finally:
         root.destroy()
-    if not (tcl / 'init.tcl').is_file() or not (toolkit / 'tk.tcl').is_file():
-        raise RuntimeError('Python Tcl/Tk installation is incomplete. Repair Python with Tcl/Tk enabled.')
-    args = ['--add-data', str(tcl) + ';_tcl_data', '--add-data', str(toolkit) + ';_tk_data']
-    # Tcl packages, including msgcat, can be siblings of the core library.
-    for name in ('tcl8', 'tcl9'):
-        directory = tcl.parent / name
-        if directory.is_dir():
-            args.extend(['--add-data', str(directory) + ';' + name])
-    return args
 
 
 def verify_executable(executable):
@@ -51,16 +74,17 @@ def build():
         subprocess.run([str(python), str(Path(__file__).resolve()), '--in-build-env'], check=True)
         return
     subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', str(root / 'requirements-build.txt')], check=True)
-    tk_args = tkinter_data_args()
     staging = root / 'build' / 'verified-output'
-    subprocess.run([
-        sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onefile', '--windowed',
-        '--name', 'InvoiceManager', '--paths', str(root), '--collect-all', 'pymupdf',
-        '--hidden-import', 'fitz', '--add-data', str(root / 'tools' / 'windows_print.ps1') + ';.',
-        *tk_args,
-        '--distpath', str(staging), '--workpath', str(root / 'build' / 'pyinstaller'),
-        '--specpath', str(root / 'build'), str(root / 'tools' / 'desktop_entry.py'),
-    ], cwd=root, check=True)
+    with tempfile.TemporaryDirectory(prefix='invoice-tcl-build-') as libraries:
+        tk_args = tkinter_data_args(Path(libraries))
+        subprocess.run([
+            sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onefile', '--windowed',
+            '--name', 'InvoiceManager', '--paths', str(root), '--collect-all', 'pymupdf',
+            '--hidden-import', 'fitz', '--add-data', str(root / 'tools' / 'windows_print.ps1') + ';.',
+            *tk_args,
+            '--distpath', str(staging), '--workpath', str(root / 'build' / 'pyinstaller'),
+            '--specpath', str(root / 'build'), str(root / 'tools' / 'desktop_entry.py'),
+        ], cwd=root, check=True)
     executable = staging / 'InvoiceManager.exe'
     verify_executable(executable)
     destination = root / 'dist' / 'InvoiceManager.exe'

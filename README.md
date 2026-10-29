@@ -12,7 +12,7 @@
 
 ## 自己打包 EXE
 
-构建电脑需要 Windows 和包含 Tcl/Tk 的 Python，双击根目录 `build_windows.bat`。脚本使用独立 `.build-venv` 构建环境，显式收集 Tcl/Tk 文件，并实际运行 EXE 自检，只有自检通过才更新 `dist/InvoiceManager.exe`。输出为 `dist/InvoiceManager.exe`，可以单独复制到其他 Windows 电脑运行。或执行：
+构建电脑需要 Windows 和包含 Tcl/Tk 的 Python，双击根目录 `build_windows.bat`。脚本使用独立 `.build-venv` 构建环境，显式收集 Tcl/Tk 文件（兼容普通目录和 Tcl zipfs 虚拟目录），并实际运行 EXE 自检，只有自检通过才更新 `dist/InvoiceManager.exe`。输出为 `dist/InvoiceManager.exe`，可以单独复制到其他 Windows 电脑运行。或执行：
 
 ```powershell
 py tools/build_windows.py

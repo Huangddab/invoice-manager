@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from tools.build_windows import build, tkinter_data_args, verify_executable
+from tools.build_windows import build, materialize_library, tkinter_data_args, verify_executable
 
 
 class WindowsBuildTests(unittest.TestCase):
@@ -22,15 +22,17 @@ class WindowsBuildTests(unittest.TestCase):
             (tk / 'tk.tcl').write_text('# test')
             window = Mock()
             window.tk.eval.side_effect = [str(tcl), str(tk)]
+            window.tk.call.return_value = 0
             with patch('tkinter.Tk', return_value=window):
-                args = tkinter_data_args()
+                args = tkinter_data_args(root / 'export')
             self.assertIn(str(tcl) + ';_tcl_data', args)
             self.assertIn(str(tk) + ';_tk_data', args)
             window.destroy.assert_called_once()
             (tk / 'tk.tcl').unlink()
             window.tk.eval.side_effect = [str(tcl), str(tk)]
-            with patch('tkinter.Tk', return_value=window), self.assertRaisesRegex(RuntimeError, 'incomplete'):
-                tkinter_data_args()
+            window.tk.call.return_value = 0
+            with patch('tkinter.Tk', return_value=window), self.assertRaisesRegex(RuntimeError, 'not readable'):
+                tkinter_data_args(root / 'export')
 
     def test_failed_exe_check_preserves_previous_executable_and_data(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -59,3 +61,29 @@ class WindowsBuildTests(unittest.TestCase):
             Path(command[-1]).write_text(json.dumps({'status': 'passed', 'data_directory': str(executable.parent / 'data')}), encoding='utf-8')
         with patch('tools.build_windows.subprocess.run', side_effect=run):
             verify_executable(executable)
+
+    def test_export_real_tcl_zipfs_library(self):
+        import tkinter as tk
+        import zipfile
+        interpreter = tk.Tcl()
+        if not interpreter.call('info', 'commands', 'zipfs'):
+            self.skipTest('zipfs requires Tcl 9')
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / 'libraries.zip'
+            with zipfile.ZipFile(archive, 'w') as output:
+                output.writestr('lib/tcl9.0/init.tcl', '# example init')
+                output.writestr('lib/tcl9.0/encoding/test.enc', '# example encoding')
+                output.writestr('lib/tk9.0/tk.tcl', '# example Tk')
+            mount = '/invoice-build-test'
+            interpreter.call('zipfs', 'mount', str(archive), mount)
+            try:
+                virtual = '//zipfs:/invoice-build-test/lib/tcl9.0'
+                self.assertFalse(Path(virtual).is_dir())
+                exported = materialize_library(interpreter, virtual, root / 'exported', 'init.tcl')
+                self.assertEqual((exported / 'init.tcl').read_text(), '# example init')
+                self.assertTrue((exported / 'encoding' / 'test.enc').is_file())
+                tk_exported = materialize_library(interpreter, '//zipfs:/invoice-build-test/lib/tk9.0', root / 'tk-exported', 'tk.tcl')
+                self.assertTrue((tk_exported / 'tk.tcl').is_file())
+            finally:
+                interpreter.call('zipfs', 'unmount', mount)
