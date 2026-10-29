@@ -5,6 +5,7 @@ from decimal import Decimal,InvalidOperation
 from pathlib import Path
 from tkinter import ttk, simpledialog, messagebox
 from read_invoice import scan_invoice_folder
+from invoice_selector import select_invoice_combination
 from datetime import date
 
 from database import (
@@ -289,14 +290,6 @@ def edit_selected_remark():
         
 # 创建报销批次
 def create_selected_batch():
-    selected = table.selection()
-
-    if not selected:
-        messagebox.showinfo(
-            "提示", "请先选择要用于本次报销的发票", parent=root
-        )
-        return
-
     try:
         days = Decimal(work_days.get().strip())
         allowance = Decimal(daily_allowance.get().strip())
@@ -321,25 +314,54 @@ def create_selected_batch():
             parent=root,
         )
         return
-
-    total = sum(
-        (
-            Decimal(table.item(number, "values")[2])
-            for number in selected
-        ),
-        Decimal("0.00"),
-    )
-
     month = reimbursement_month.get().strip()
     target = days * allowance
+
+    try:
+        # 从完整库存查询，不受界面筛选条件影响
+        candidates = list_invoices()
+        recommended = select_invoice_combination(
+            candidates,
+            int(target * 100),
+        )
+    except (ValueError, sqlite3.Error) as error:
+        messagebox.showwarning(
+            "无法自动选票", str(error), parent=root
+        )
+        return
+
+    if not recommended:
+        messagebox.showinfo(
+            "提示", "没有可用于报销的待使用发票", parent=root
+        )
+        return
+
+    selected = [
+        invoice["invoice_number"]
+        for invoice in recommended
+    ]
+
+    total = Decimal(
+        sum(
+            invoice["total_amount_fen"]
+            for invoice in recommended
+        )
+    ) / 100
+
     difference = total - target
 
+    invoice_details = "\n".join(
+        f"{invoice['seller']}："
+        f"{Decimal(invoice['total_amount_fen']) / 100:.2f} 元"
+        for invoice in recommended
+    )
     confirmed = messagebox.askyesno(
         "确认创建报销单",
         f"报销月份：{month}\n"
         f"报销目标：{target:.2f} 元\n"
-        f"所选发票：{len(selected)} 张，共 {total:.2f} 元\n"
+        f"自动推荐：{len(selected)} 张，共 {total:.2f} 元\n"
         f"差额（选票金额－目标）：{difference:+.2f} 元\n\n"
+        f"{invoice_details}\n\n"
         "创建后将整张预留这些发票，不能再加入其他报销单。\n"
         "是否继续？",
         parent=root,
