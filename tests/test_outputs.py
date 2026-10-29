@@ -1,3 +1,4 @@
+import base64
 import hashlib
 from pathlib import Path
 import tempfile
@@ -9,7 +10,7 @@ import zipfile
 import fitz
 import database
 from batch_view import BatchView
-from invoice_files import export_name, export_zip, original_path, prepare_print_pdf, print_command, submit_print
+from invoice_files import batch_export_name, prepare_windows_images, export_name, export_zip, original_path, prepare_print_pdf, print_command, submit_print
 from read_invoice import import_invoices
 
 
@@ -91,6 +92,40 @@ class OutputTests(unittest.TestCase):
             document.save(multi)
         with self.assertRaises(ValueError):
             prepare_print_pdf([dict(self.rows[0], file_path=str(multi))], self.directory / 'print.pdf')
+
+    def test_export_package_name(self):
+        rows = [dict(self.rows[0], total_amount_fen=9000)]
+        self.assertEqual(batch_export_name('2026-10', 10000, rows), '2026-10应报销：100实际报销：90差额-10.zip')
+        self.assertEqual(batch_export_name('2026-10', 9000, rows), '2026-10应报销：90实际报销：90差额0.zip')
+        self.assertEqual(batch_export_name('2026-10', 8000, rows), '2026-10应报销：80实际报销：90差额10.zip')
+        self.assertNotIn(':', batch_export_name('2026-10', 10000, rows))
+        _, view = self.make_view()
+        with patch('batch_view.filedialog.asksaveasfilename', return_value='') as dialog:
+            view.export()
+        self.assertEqual(dialog.call_args.kwargs['initialfile'], '2026-10应报销：500实际报销：428差额-72.zip')
+
+    def test_windows_builtin_print_command_and_rendered_images(self):
+        destination = self.directory / 'print.pdf'
+        prepare_print_pdf(self.rows, destination)
+        images = prepare_windows_images(destination)
+        self.assertEqual(len(list(images.glob('*.png'))), 1)
+        pixmap = fitz.Pixmap(str(next(images.glob('*.png'))))
+        self.assertEqual(pixmap.n, 1)
+        with patch('invoice_files.sys.platform', 'win32'), patch('invoice_files.shutil.which', return_value=None):
+            command = print_command(destination)
+        self.assertEqual(command[0], 'powershell.exe')
+        self.assertIn('-STA', command)
+        script = base64.b64decode(command[-1]).decode('utf-16-le')
+        self.assertIn('System.Windows.Forms.PrintDialog', script)
+        self.assertIn('PaperKind]::A5', script)
+        self.assertIn('Landscape = $true', script)
+        self.assertIn('Color = $false', script)
+        self.assertIn('exit 2', script)
+        with patch('invoice_files.subprocess.run') as runner:
+            runner.return_value.returncode = 2
+            with self.assertRaisesRegex(RuntimeError, '已取消打印'):
+                submit_print(command)
+        self.assertEqual(database.list_invoices()[0]['is_printed'], 0)
 
     def test_windows_print_settings_and_failed_command(self):
         with patch('invoice_files.sys.platform', 'win32'):

@@ -9,7 +9,7 @@ import tkinter as tk
 from tkinter import filedialog, ttk
 
 import database
-from invoice_files import export_zip, original_path, prepare_print_pdf, print_command, submit_print
+from invoice_files import batch_export_name, export_zip, original_path, prepare_print_pdf, print_command, submit_print
 
 
 def amount(fen):
@@ -75,6 +75,7 @@ class BatchView:
     def reload(self):
         batches = database.list_reimbursement_batches()
         batch = next(row for row in batches if row['id'] == self.batch_id)
+        self.batch = batch
         self.batch_status = batch['status']
         self.rows = database.reimbursement_invoices(self.batch_id)
         target = batch['work_days'] * batch['daily_allowance_fen']
@@ -133,7 +134,7 @@ class BatchView:
         if not rows:
             return
         path = filedialog.asksaveasfilename(parent=self.window, title='导出原始 PDF 压缩包', defaultextension='.zip',
-                    initialfile=f'报销单_{self.batch_id}.zip', filetypes=[('ZIP 压缩包', '*.zip')])
+                    initialfile=batch_export_name(self.batch['reimbursement_month'], self.batch['work_days'] * self.batch['daily_allowance_fen'], rows), filetypes=[('ZIP 压缩包', '*.zip')])
         if not path:
             return
         try:
@@ -164,19 +165,10 @@ class BatchView:
         temporary = tempfile.TemporaryDirectory(prefix='invoice-print-')
         pdf = Path(temporary.name) / 'A5-landscape-grayscale.pdf'
         try:
-            try:
-                command = print_command(pdf)
-            except FileNotFoundError:
-                if sys.platform != 'win32':
-                    raise
-                executable = filedialog.askopenfilename(parent=self.window, title='选择 SumatraPDF.exe（需先安装 SumatraPDF）', filetypes=[('SumatraPDF', 'SumatraPDF.exe')])
-                if not executable:
-                    temporary.cleanup()
-                    return
-                command = print_command(pdf, executable)
+            command = print_command(pdf)
         except OSError as error:
             temporary.cleanup()
-            self.feedback.set(f'无法打印：{error}')
+            self.feedback.set(f'无法启动打印：{error}。请检查系统打印机及依赖安装：python -m pip install -r requirements.txt')
             return
         self.busy = True
         self.print_button.configure(state='disabled')

@@ -1,4 +1,5 @@
 """Managed originals, company export names, and independent print copies."""
+import base64
 from decimal import Decimal
 import os
 from pathlib import Path
@@ -33,6 +34,13 @@ def export_name(invoice):
     return f'{number}_{seller}_{amount}.pdf'
 
 
+def batch_export_name(month, target_fen, invoices):
+    def compact(fen):
+        return format(Decimal(fen) / 100, '.2f').rstrip('0').rstrip('.')
+    total = sum(row['total_amount_fen'] for row in invoices)
+    return f'{month}应报销：{compact(target_fen)}实际报销：{compact(total)}差额{compact(total-target_fen)}.zip'
+
+
 def export_zip(invoices, destination):
     invoices = list(invoices)
     if not invoices:
@@ -57,7 +65,10 @@ def export_zip(invoices, destination):
 
 def prepare_print_pdf(invoices, destination):
     """A5 landscape, grayscale, one complete invoice per sheet, 5 mm margins."""
-    import fitz
+    try:
+        import fitz
+    except ImportError as error:
+        raise RuntimeError('缺少打印所需的 PyMuPDF，请在项目目录执行：python -m pip install -r requirements.txt') from error
     rows = list(invoices)
     if not rows:
         raise ValueError('请至少勾选一张发票')
@@ -73,19 +84,28 @@ def prepare_print_pdf(invoices, destination):
                 target = output.new_page(width=width, height=height)
                 target.insert_image(fitz.Rect(margin, margin, width - margin, height - margin), pixmap=pixmap, keep_proportion=True)
         output.save(destination, deflate=True)
+    if sys.platform == 'win32':
+        prepare_windows_images(destination)
+
+
+def prepare_windows_images(pdf):
+    import fitz
+    directory = Path(pdf).parent / 'native-print-pages'
+    directory.mkdir(exist_ok=True)
+    with fitz.open(pdf) as document:
+        for index, page in enumerate(document):
+            page.get_pixmap(matrix=fitz.Matrix(200 / 72, 200 / 72), colorspace=fitz.csGRAY, alpha=False).save(directory / f'{index:06d}.png')
+    return directory
 
 
 def print_command(pdf, sumatra=None):
     if sys.platform == 'win32':
-        executable = sumatra or shutil.which('SumatraPDF.exe')
-        if not executable:
-            for base in (os.environ.get('LOCALAPPDATA'), os.environ.get('PROGRAMFILES'), os.environ.get('PROGRAMFILES(X86)')):
-                if base and (Path(base) / 'SumatraPDF' / 'SumatraPDF.exe').is_file():
-                    executable = str(Path(base) / 'SumatraPDF' / 'SumatraPDF.exe')
-                    break
-        if not executable:
-            raise FileNotFoundError('请安装 SumatraPDF，或在下一步选择 SumatraPDF.exe，用于设置 A5 横向黑白打印')
-        return [executable, '-print-dialog', '-exit-when-done', '-print-settings', 'paper=A5,landscape,monochrome,fit', str(pdf)]
+        if sumatra:
+            return [sumatra, '-print-dialog', '-exit-when-done', '-print-settings', 'paper=A5,landscape,monochrome,fit', str(pdf)]
+        directory = str((Path(pdf).parent / 'native-print-pages').resolve()).replace("'", "''")
+        script = "$ImageDirectory = '" + directory + "'\n" + Path(__file__).with_name('windows_print.ps1').read_text(encoding='utf-8')
+        encoded = base64.b64encode(script.encode('utf-16-le')).decode('ascii')
+        return ['powershell.exe', '-NoProfile', '-STA', '-EncodedCommand', encoded]
     executable = shutil.which('lp')
     if not executable:
         raise FileNotFoundError('未找到系统打印命令 lp，请配置打印机后重试')
@@ -94,7 +114,9 @@ def print_command(pdf, sumatra=None):
 
 
 def submit_print(command):
-    result = subprocess.run(command, capture_output=True, text=True, errors='replace')
+    result = subprocess.run(command, capture_output=True, text=True, encoding='utf-8', errors='replace')
+    if result.returncode == 2 and Path(command[0]).name.lower() == 'powershell.exe':
+        raise RuntimeError('已取消打印，未修改打印状态')
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or '打印命令未成功执行')
     # A successful command only means submission, never physical success.
