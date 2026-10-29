@@ -207,11 +207,14 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(database.list_invoices()[0]['status'], 'used')
         self.assertEqual(str(view.finish_button['state']), 'disabled')
 
-    def test_inline_release_reservation(self):
+    def test_popup_release_reservation(self):
         _, view = self.make_view()
-        view.request_finish('cancelled')
+        with patch('batch_view.messagebox.askyesno', return_value=False):
+            view.request_finish('cancelled')
         self.assertEqual(database.list_invoices()[0]['status'], 'reserved')
-        view.confirm_pending()
+        self.assertEqual(len(database.list_reimbursement_batches()), 1)
+        with patch('batch_view.messagebox.askyesno', return_value=True):
+            view.request_finish('cancelled')
         self.assertEqual(database.list_invoices()[0]['status'], 'available')
         self.assertEqual(database.list_reimbursement_batches(), [])
         self.assertEqual(database.reimbursement_invoices(self.batch), [])

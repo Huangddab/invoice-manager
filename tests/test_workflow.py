@@ -237,8 +237,8 @@ class WorkflowTests(unittest.TestCase):
         app.workflow.confirm_proposal()
         view = app.workflow.batch_view
         database.update_printed_batch([view.rows[0]['invoice_number']], True)
-        view.request_finish('cancelled')
-        view.confirm_pending()
+        with patch('batch_view.messagebox.askyesno', return_value=True):
+            view.request_finish('cancelled')
         root.update()
         self.assertIsNone(app.workflow.batch_view)
         self.assertEqual(app.workflow.preview.get_children(), ())

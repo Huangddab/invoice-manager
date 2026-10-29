@@ -6,7 +6,7 @@ import sys
 import tempfile
 import threading
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import database
 from invoice_files import batch_export_name, export_zip, original_path, prepare_print_pdf, print_command, submit_print
@@ -235,6 +235,11 @@ class BatchView:
     def request_finish(self, action):
         if self.busy or self.pending_print is not None:
             self.feedback.set('请先确认打印结果。')
+            return
+        if action == 'cancelled':
+            if messagebox.askyesno('取消报销单', '确认取消此报销单？\n将删除该单记录并释放预留发票，原件和打印状态保留。', parent=self.window):
+                self.pending_action = action
+                self.confirm_pending()
             return
         self.pending_action = action
         if action == 'used':
