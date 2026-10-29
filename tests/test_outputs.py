@@ -214,6 +214,38 @@ class OutputTests(unittest.TestCase):
         view.confirm_pending()
         self.assertEqual(database.list_invoices()[0]['status'], 'available')
 
+    def test_open_original_works_immediately_without_clicking_row(self):
+        _, view = self.make_view()
+        self.assertEqual(view.tree.selection(), (self.number,))
+        with patch('app.open_document') as opener:
+            view.open_pdf()
+        opener.assert_called_once_with(original_path(self.rows[0]))
+        self.assertIn('正在打开 PDF', view.feedback.get())
+        view.check_all(False)
+        with patch('app.open_document') as opener:
+            view.open_pdf()
+        opener.assert_called_once()
+
+    def test_open_missing_file_and_empty_selection_report_errors(self):
+        _, view = self.make_view()
+        view.tree.selection_remove(*view.tree.selection())
+        view.open_pdf()
+        self.assertIn('请先点击', view.feedback.get())
+        view.tree.selection_set(self.number)
+        original_path(self.rows[0]).unlink()
+        with patch('app.open_document') as opener:
+            view.open_pdf()
+        opener.assert_not_called()
+        self.assertIn('无法打开', view.feedback.get())
+
+    def test_windows_missing_default_reader_has_actionable_error(self):
+        from app import open_document
+        error = OSError('no association')
+        error.winerror = 1155
+        with patch('app.sys.platform', 'win32'), patch('app.os.startfile', create=True, side_effect=error):
+            with self.assertRaisesRegex(OSError, '默认打开方式'):
+                open_document(self.pdf)
+
     def test_no_checkboxes_selected_reports_inline(self):
         _, view = self.make_view()
         view.check_all(False)

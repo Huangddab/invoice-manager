@@ -20,7 +20,12 @@ STATUS = {"available": "待使用", "reserved": "已预留", "used": "已使用"
 
 def open_document(path):
     if sys.platform == "win32":
-        os.startfile(str(Path(path).resolve()))
+        try:
+            os.startfile(str(Path(path).resolve()))
+        except OSError as error:
+            if getattr(error, 'winerror', None) == 1155:
+                raise OSError('请在 Windows 中将 Edge 或其他 PDF 阅读器设为 PDF 默认打开方式。') from error
+            raise
     else:
         subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(Path(path).resolve())])
 
@@ -74,7 +79,7 @@ class InvoiceApp:
         self.days = tk.StringVar(root, "20")
         self.allowance = tk.StringVar(root, "25")
         self.target_summary = tk.StringVar(root)
-        self.feedback = tk.StringVar(root, "先导入 PDF，再选择发票进行操作。")
+        self.feedback = tk.StringVar(root, "")
         root.title("个人发票管理")
         root.geometry("1180x720")
         root.minsize(900, 560)
@@ -102,7 +107,6 @@ class InvoiceApp:
         self.import_button.pack(side="right")
         ttk.Button(header, text="扫描发票目录", command=self.scan_folder).pack(side="right", padx=8)
         ttk.Button(header, text="刷新", command=self.refresh).pack(side="right", padx=8)
-        ttk.Label(outer, text="集中管理发票、打印进度和报销使用状态").pack(anchor="w", pady=(4, 14))
         ttk.Label(outer, textvariable=self.summary, style="Summary.TLabel").pack(anchor="w", pady=(0, 16))
         filters = ttk.Frame(outer)
         filters.pack(fill="x", pady=(0, 12))
@@ -114,7 +118,6 @@ class InvoiceApp:
             ttk.Label(filters, text=label).pack(side="left")
             ttk.Combobox(filters, textvariable=variable, values=values, state="readonly", width=9).pack(side="left", padx=8)
         ttk.Button(filters, text="重置筛选", command=self.reset_filters).pack(side="right")
-        ttk.Label(outer, text="库存用于导入、查询与备注；请到「本月报销」生成方案，之后直接在同一页面打印、导出。").pack(anchor="w", pady=(0, 8))
         frame = ttk.Frame(outer)
         frame.pack(fill="both", expand=True)
         columns = ("number", "date", "seller", "amount", "printed", "status", "remark")
@@ -275,6 +278,7 @@ class InvoiceApp:
             return
         try:
             open_document(path)
+            self.feedback.set(f"正在打开 PDF：{selected[0]}")
         except OSError as error:
             self.feedback.set(f"无法打开 PDF：{error}")
 

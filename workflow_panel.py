@@ -14,9 +14,9 @@ class MonthlyWorkflow:
         self.changed = changed
         self.proposal = None
         self.batch_view = None
-        self.feedback = tk.StringVar(parent, '填写天数和每日金额，然后生成方案；无需手动选票。')
+        self.feedback = tk.StringVar(parent, '')
         self.total = tk.StringVar(parent)
-        self.stage = tk.StringVar(parent, '① 填写目标 → ② 生成并确认方案 → ③ 打印 / 导出 → ④ 确认已报销')
+        self.stage = tk.StringVar(parent, '本月报销')
         ttk.Label(parent, textvariable=self.stage, padding=12, font=('', 12, 'bold')).pack(anchor='w')
         form = ttk.Frame(parent, padding=12)
         form.pack(fill='x')
@@ -49,21 +49,21 @@ class MonthlyWorkflow:
             _, days, allowance = reimbursement_inputs(self.month.get().strip(), self.days.get().strip(), self.allowance.get().strip())
             self.total.set(f'报销目标 ¥ {money(days * allowance)}')
             if self.batch_view is None:
-                self.feedback.set('点击「生成方案」自动凑票；确认前不会占用库存。')
+                self.feedback.set('')
         except ValueError as error:
             self.total.set(str(error))
 
     def generate(self):
         from app import reimbursement_inputs, money
         if self.batch_view and (self.batch_view.busy or self.batch_view.pending_print is not None or self.batch_view.pending_action is not None):
-            self.feedback.set('请先在下方处理打印或报销确认，再生成新方案。')
+            self.feedback.set('请先完成当前确认。')
             return
         try:
             inputs = reimbursement_inputs(self.month.get().strip(), self.days.get().strip(), self.allowance.get().strip())
             month, days, allowance = inputs
             rows = select_invoice_combination(database.list_invoices(), days * allowance)
             if not rows:
-                raise ValueError('没有可用发票，请到「发票库存」导入 PDF；预留、已使用、不可用发票不参与凑票。')
+                raise ValueError('暂无可用发票，请到「发票库存」导入。')
         except (ValueError, sqlite3.Error) as error:
             self.proposal = None
             self.confirm.configure(state='disabled')
@@ -81,12 +81,12 @@ class MonthlyWorkflow:
         self.total.set(f'{month} · 目标 ¥ {money(days * allowance)} · 自动凑票 {len(rows)} 张，共 ¥ {money(total)} · 差额 ¥ {money(difference)}')
         self.proposal = (inputs, rows)
         self.confirm.configure(state='normal')
-        self.feedback.set('请核对上方金额和下方清单，点击「确认方案并预留」进入打印 / 导出。尚未预留发票。')
-        self.stage.set('① 已填写目标 → ② 请确认方案 → ③ 打印 / 导出 → ④ 确认已报销')
+        self.feedback.set('')
+        self.stage.set('确认方案')
 
     def confirm_proposal(self):
         if not self.proposal:
-            self.feedback.set('请先生成方案；修改目标后需要重新生成。')
+            self.feedback.set('请先生成方案。')
             return
         inputs, rows = self.proposal
         try:
@@ -101,16 +101,17 @@ class MonthlyWorkflow:
 
     def open_batch(self, batch_id):
         if self.batch_view and (self.batch_view.busy or self.batch_view.pending_print is not None or self.batch_view.pending_action is not None):
-            self.feedback.set('请先处理当前打印或报销确认，再切换报销单。')
+            self.feedback.set('请先完成当前确认。')
             return False
         if self.batch_view:
             self.batch_view.window.destroy()
         self.preview.pack_forget()
+        self.total.set('')
         self.proposal = None
         self.confirm.configure(state='disabled')
         self.batch_view = BatchView(self.body, batch_id, self.batch_changed)
-        self.feedback.set('在下方直接勾选、打印、导出和确认已报销。打印 / 导出不会自动标记已使用。')
-        self.stage.set('① 已填写目标 → ② 已确认方案 → ③ 打印 / 导出 → ④ 核实后确认已报销')
+        self.feedback.set('')
+        self.stage.set('打印 / 导出')
         return True
 
 
@@ -118,15 +119,15 @@ class MonthlyWorkflow:
         self.changed()
         state = self.batch_view.batch_status
         if state == 'used':
-            self.stage.set('本单已完成报销 · 发票已整张标记已使用 · 可继续查看、导出或重打')
+            self.stage.set('本单已完成报销')
         elif state == 'cancelled':
-            self.stage.set('本单已取消 · 预留已释放 · 可重新填写目标并生成方案')
+            self.stage.set('本单已取消')
 
 
 class HistoryPanel:
     def __init__(self, parent, open_batch):
         self.open_batch = open_batch
-        self.feedback = tk.StringVar(parent, '选择报销单后点击「继续办理」，在本窗口查看明细、打印、导出或确认报销。')
+        self.feedback = tk.StringVar(parent, '')
         bar = ttk.Frame(parent, padding=12)
         bar.pack(fill='x')
         ttk.Button(bar, text='继续办理 / 查看明细', command=self.open_selected).pack(side='left')
