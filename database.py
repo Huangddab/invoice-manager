@@ -1,13 +1,16 @@
 import sqlite3
 
 from pathlib import Path
+from datetime import datetime
 
 DB_PATH = Path(__file__).resolve().parent / "invoices.db"
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA foreign_keys = ON")
     
     try:
+        # 创建发票表
         conn.execute("""
             CREATE TABLE IF NOT EXISTS invoices (
                 invoice_number TEXT PRIMARY KEY,
@@ -23,8 +26,32 @@ def init_db():
                 remark TEXT NOT NULL DEFAULT ''
             )
         """)
+        # 创建报销批次表
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS reimbursement_batches (
+                id INTEGER PRIMARY KEY,
+                reimbursement_month TEXT NOT NULL,
+                work_days INTEGER NOT NULL
+                    CHECK (work_days BETWEEN 0 AND 31),
+                daily_allowance_fen INTEGER NOT NULL
+                    CHECK (daily_allowance_fen >= 0),
+                status TEXT NOT NULL DEFAULT 'reserved'
+                    CHECK (status IN ('reserved', 'used', 'cancelled')),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS reimbursement_items (
+                batch_id INTEGER NOT NULL,
+                invoice_number TEXT NOT NULL,
+                PRIMARY KEY (batch_id, invoice_number),
+                FOREIGN KEY (batch_id)
+                    REFERENCES reimbursement_batches(id),
+                FOREIGN KEY (invoice_number)
+                    REFERENCES invoices(invoice_number)
+            )
+        """)
         conn.commit()
-        
     finally:
         conn.close()
 
@@ -146,7 +173,7 @@ def update_printed_batch(invoice_numbers, is_printed):
         """, [(int(is_printed), invoice_number) for invoice_number in invoice_numbers])
 
         conn.commit()
-        return cursor.rowcount == len(invoice_numbers)
+        return cursor.rowcount
     except Exception:
         conn.rollback()
         raise
@@ -168,6 +195,89 @@ def get_invoice_file_path(invoice_number):
     finally:
         conn.close()
 
+# 创建报销批次及其对应的发票项
+def create_reimbursement_batch(
+    reimbursement_month,
+    work_days,
+    daily_allowance_fen,
+    invoice_numbers,
+):
+    # 检查月份格式
+    try:
+        month = datetime.strptime(reimbursement_month, "%Y-%m")
+    except ValueError:
+        raise ValueError("报销月份格式应为 YYYY-MM")
+
+    if month.strftime("%Y-%m") != reimbursement_month:
+        raise ValueError("报销月份格式应为 YYYY-MM")
+
+    if type(work_days) is not int or not 0 <= work_days <= 31:
+        raise ValueError("可报销天数必须是 0～31 的整数")
+
+    if (
+        type(daily_allowance_fen) is not int
+        or daily_allowance_fen < 0
+    ):
+        raise ValueError("每日标准必须是非负整数，单位为分")
+
+    # 去掉重复号码，同时保留原顺序
+    invoice_numbers = list(dict.fromkeys(invoice_numbers))
+
+    if not invoice_numbers:
+        raise ValueError("请至少选择一张发票")
+
+    conn = sqlite3.connect(DB_PATH)
+
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        # 开始创建报销批次及其对应的发票项的事务
+        conn.execute("BEGIN IMMEDIATE")
+        # 插入报销批次记录
+        cursor = conn.execute("""
+            INSERT INTO reimbursement_batches (
+                reimbursement_month,
+                work_days,
+                daily_allowance_fen
+            )
+            VALUES (?, ?, ?)
+        """, (
+            reimbursement_month,
+            work_days,
+            daily_allowance_fen,
+        ))
+
+        batch_id = cursor.lastrowid
+        # 遍历发票号码，更新发票状态并插入报销项记录
+        for invoice_number in invoice_numbers:
+            cursor = conn.execute("""
+                UPDATE invoices
+                SET status = 'reserved'
+                WHERE invoice_number = ?
+                  AND status = 'available'
+            """, (invoice_number,))
+
+            if cursor.rowcount != 1:
+                raise ValueError(
+                    f"发票不存在或不是待使用状态：{invoice_number}"
+                )
+
+            conn.execute("""
+                INSERT INTO reimbursement_items (
+                    batch_id,
+                    invoice_number
+                )
+                VALUES (?, ?)
+            """, (batch_id, invoice_number))
+
+        conn.commit()
+        return batch_id
+
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+        
 if __name__ == "__main__":
     init_db()
     print("数据库初始化完成:",DB_PATH)
