@@ -8,6 +8,7 @@ def select_invoice_combination(invoices, target_fen):
             invoice
             for invoice in invoices
             if invoice["status"] == "available"
+            and invoice.get("category", "meal") == "meal"
             and invoice["total_amount_fen"] > 0
         ),
         key=lambda invoice: (

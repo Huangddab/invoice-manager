@@ -39,10 +39,10 @@ class BatchView:
         self.print_button = ttk.Button(controls, text='打印（A5 横向黑白）', command=self.print_checked)
         self.print_button.pack(side='right')
         frame = ttk.Frame(self.window, padding=12)
-        columns = ('check', 'number', 'date', 'buyer', 'seller', 'amount', 'printed', 'remark')
+        columns = ('check', 'category', 'number', 'date', 'buyer', 'seller', 'amount', 'printed', 'remark')
         self.tree = ttk.Treeview(frame, columns=columns, show='headings', selectmode='browse')
-        for key, title, width in zip(columns, ('勾选', '发票号码', '开票日期', '购买方', '销售方', '真实金额', '打印状态', '备注'),
-                                    (55, 180, 100, 160, 200, 95, 85, 160)):
+        for key, title, width in zip(columns, ('勾选', '分类', '发票号码', '开票日期', '购买方', '销售方', '真实金额', '打印状态', '备注'),
+                                    (55, 60, 180, 100, 160, 200, 95, 85, 160)):
             self.tree.heading(key, text=title)
             self.tree.column(key, width=width, minwidth=50)
         scroll = ttk.Scrollbar(frame, orient='vertical', command=self.tree.yview)
@@ -78,7 +78,7 @@ class BatchView:
         self.batch = batch
         self.batch_status = batch['status']
         self.rows = database.reimbursement_invoices(self.batch_id)
-        target = batch['work_days'] * batch['daily_allowance_fen']
+        target = batch['work_days'] * batch['daily_allowance_fen'] + batch['other_amount_fen']
         total = sum(row['total_amount_fen'] for row in self.rows)
         state = {'reserved': '待报销（已预留）', 'used': '已报销', 'cancelled': '已取消'}[batch['status']]
         self.header.set(f"{batch['reimbursement_month']} · {state} · 目标 ¥{amount(target)} / 实际 ¥{amount(total)} / 差额 ¥{amount(total-target)}")
@@ -91,7 +91,7 @@ class BatchView:
         self.tree.delete(*self.tree.get_children())
         for row in self.rows:
             self.tree.insert('', 'end', iid=row['invoice_number'], values=(
-                '☑' if row['invoice_number'] in self.checked else '☐', row['invoice_number'], row['invoice_date'],
+                '☑' if row['invoice_number'] in self.checked else '☐', '餐补' if row['category'] == 'meal' else '其他', row['invoice_number'], row['invoice_date'],
                 row['buyer'], row['seller'], amount(row['total_amount_fen']), '已打印' if row['is_printed'] else '未打印', row['remark']))
         if self.rows:
             number = selected[0] if selected and self.tree.exists(selected[0]) else self.rows[0]['invoice_number']
@@ -139,7 +139,7 @@ class BatchView:
         if not rows:
             return
         path = filedialog.asksaveasfilename(parent=self.window, title='导出原始 PDF 压缩包', defaultextension='.zip',
-                    initialfile=batch_export_name(self.batch['reimbursement_month'], self.batch['work_days'] * self.batch['daily_allowance_fen'], rows), filetypes=[('ZIP 压缩包', '*.zip')])
+                    initialfile=batch_export_name(self.batch['reimbursement_month'], self.batch['work_days'] * self.batch['daily_allowance_fen'] + self.batch['other_amount_fen'], rows), filetypes=[('ZIP 压缩包', '*.zip')])
         if not path:
             return
         try:

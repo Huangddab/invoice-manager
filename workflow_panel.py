@@ -14,6 +14,8 @@ class MonthlyWorkflow:
         self.changed = changed
         self.proposal = None
         self.batch_view = None
+        self.other_checked = set()
+        self.other_rows = []
         self.feedback = tk.StringVar(parent, '')
         self.total = tk.StringVar(parent)
         self.stage = tk.StringVar(parent, '本月报销')
@@ -26,28 +28,97 @@ class MonthlyWorkflow:
         ttk.Button(form, text='生成方案', command=self.generate).pack(side='left')
         self.confirm = ttk.Button(form, text='确认方案并预留', command=self.confirm_proposal, state='disabled')
         self.confirm.pack(side='left', padx=8)
-        ttk.Label(parent, textvariable=self.total, padding=(12, 4)).pack(anchor='w')
+        self.other_bar = ttk.Frame(parent, padding=(12, 2))
+        self.other_bar.pack(fill='x')
+        self.other_button = ttk.Button(self.other_bar, text='选择其他发票（0 张）', command=self.toggle_other_panel)
+        self.other_button.pack(side='left')
+        self.other_frame = ttk.Frame(parent, padding=(12, 4))
+        self.other_tree = ttk.Treeview(self.other_frame, columns=('check', 'number', 'seller', 'amount'), show='headings', height=3, selectmode='browse')
+        for key, title, width in [('check', '勾选', 55), ('number', '发票号', 210), ('seller', '销售方', 420), ('amount', '金额', 130)]:
+            self.other_tree.heading(key, text=title)
+            self.other_tree.column(key, width=width)
+        self.other_tree.pack(side='left', fill='both', expand=True)
+        scrollbar = ttk.Scrollbar(self.other_frame, orient='vertical', command=self.other_tree.yview)
+        scrollbar.pack(side='right', fill='y')
+        self.other_tree.configure(yscrollcommand=scrollbar.set)
+        self.other_tree.bind('<Button-1>', self.toggle_other)
+        self.other_tree.bind('<space>', self.toggle_other_keyboard)
+        self.total_label = ttk.Label(parent, textvariable=self.total, padding=(12, 4))
+        self.total_label.pack(anchor='w')
         ttk.Label(parent, textvariable=self.feedback, padding=12, wraplength=1050).pack(anchor='w')
         self.body = ttk.Frame(parent)
         self.body.pack(fill='both', expand=True)
-        self.preview = ttk.Treeview(self.body, columns=('number', 'seller', 'date', 'amount'), show='headings')
-        for key, label in zip(self.preview['columns'], ('发票号', '销售方', '日期', '金额（元）')):
+        self.preview = ttk.Treeview(self.body, columns=('category', 'number', 'seller', 'date', 'amount'), show='headings')
+        for key, label in zip(self.preview['columns'], ('分类', '发票号', '销售方', '日期', '金额（元）')):
             self.preview.heading(key, text=label)
             self.preview.column(key, width=180)
         self.preview.pack(fill='both', expand=True, padx=12, pady=12)
         for variable in (month, days, allowance):
             variable.trace_add('write', self.inputs_changed)
+        self.refresh_other()
         self.inputs_changed()
+
+    def refresh_other(self):
+        from app import money
+        try:
+            self.other_rows = [row for row in database.list_invoices() if row['category'] == 'other' and row['status'] == 'available']
+        except sqlite3.Error as error:
+            self.feedback.set(str(error))
+            return
+        previous = set(self.other_checked)
+        self.other_checked.intersection_update(row['invoice_number'] for row in self.other_rows)
+        self.other_tree.delete(*self.other_tree.get_children())
+        for row in self.other_rows:
+            self.other_tree.insert('', 'end', iid=row['invoice_number'], values=('☑' if row['invoice_number'] in self.other_checked else '☐', row['invoice_number'], row['seller'], money(row['total_amount_fen'])))
+        self.other_button.configure(text=f'选择其他发票（{len(self.other_checked)} 张）')
+        if previous != self.other_checked:
+            self.inputs_changed()
+
+    def toggle_other_panel(self):
+        if self.other_frame.winfo_manager():
+            self.other_frame.pack_forget()
+        else:
+            self.refresh_other()
+            self.other_frame.pack(fill='x', before=self.total_label)
+            if not self.other_rows:
+                self.feedback.set('暂无待使用的其他发票，可在库存中导入或调整分类。')
+
+    def toggle_other_number(self, number):
+        if not any(row['invoice_number'] == number for row in self.other_rows):
+            return
+        if number in self.other_checked:
+            self.other_checked.remove(number)
+        else:
+            self.other_checked.add(number)
+        self.refresh_other()
+        self.other_tree.selection_set(number)
+        self.other_tree.focus(number)
+        self.inputs_changed()
+
+    def toggle_other(self, event):
+        number = self.other_tree.identify_row(event.y)
+        if number and self.other_tree.identify_column(event.x) == '#1':
+            self.toggle_other_number(number)
+            return 'break'
+
+    def toggle_other_keyboard(self, event):
+        number = self.other_tree.focus()
+        if number:
+            self.toggle_other_number(number)
+        return 'break'
 
     def inputs_changed(self, *args):
         from app import reimbursement_inputs, money
         self.proposal = None
         self.confirm.configure(state='disabled')
-        if self.batch_view is None:
-            self.preview.delete(*self.preview.get_children())
+        if self.batch_view is not None:
+            self.total.set('')
+            return
+        self.preview.delete(*self.preview.get_children())
         try:
             _, days, allowance = reimbursement_inputs(self.month.get().strip(), self.days.get().strip(), self.allowance.get().strip())
-            self.total.set(f'报销目标 ¥ {money(days * allowance)}')
+            other_total = sum(row['total_amount_fen'] for row in self.other_rows if row['invoice_number'] in self.other_checked)
+            self.total.set(f'餐补目标 ¥{money(days * allowance)} · 其他 ¥{money(other_total)} · 合计应报销 ¥{money(days * allowance + other_total)}')
             if self.batch_view is None:
                 self.feedback.set('')
         except ValueError as error:
@@ -61,7 +132,13 @@ class MonthlyWorkflow:
         try:
             inputs = reimbursement_inputs(self.month.get().strip(), self.days.get().strip(), self.allowance.get().strip())
             month, days, allowance = inputs
-            rows = select_invoice_combination(database.list_invoices(), days * allowance)
+            self.refresh_other()
+            inventory = database.list_invoices()
+            meals = select_invoice_combination(inventory, days * allowance) if days * allowance > 0 else []
+            if days * allowance > 0 and not meals:
+                raise ValueError('暂无可用餐补发票；只报其他发票时，将天数设为 0。')
+            others = [row for row in self.other_rows if row['invoice_number'] in self.other_checked]
+            rows = meals + others
             if not rows:
                 raise ValueError('暂无可用发票，请到「发票库存」导入。')
         except (ValueError, sqlite3.Error) as error:
@@ -75,10 +152,12 @@ class MonthlyWorkflow:
         self.preview.pack(fill='both', expand=True, padx=12, pady=12)
         self.preview.delete(*self.preview.get_children())
         for row in rows:
-            self.preview.insert('', 'end', values=(row['invoice_number'], row['seller'], row['invoice_date'], money(row['total_amount_fen'])))
+            self.preview.insert('', 'end', values=('餐补' if row['category'] == 'meal' else '其他', row['invoice_number'], row['seller'], row['invoice_date'], money(row['total_amount_fen'])))
         total = sum(row['total_amount_fen'] for row in rows)
-        difference = total - days * allowance
-        self.total.set(f'{month} · 目标 ¥ {money(days * allowance)} · 自动凑票 {len(rows)} 张，共 ¥ {money(total)} · 差额 ¥ {money(difference)}')
+        other_total = sum(row['total_amount_fen'] for row in others)
+        target = days * allowance + other_total
+        difference = total - target
+        self.total.set(f'餐补 ¥{money(total-other_total)} / 目标 ¥{money(days*allowance)} · 其他 ¥{money(other_total)} · 合计 ¥{money(total)} · 差额 ¥{money(difference)}')
         self.proposal = (inputs, rows)
         self.confirm.configure(state='normal')
         self.feedback.set('')
@@ -90,7 +169,7 @@ class MonthlyWorkflow:
             return
         inputs, rows = self.proposal
         try:
-            batch_id = database.create_reimbursement_batch(*inputs, [row['invoice_number'] for row in rows])
+            batch_id = database.create_reimbursement_batch(*inputs, [row['invoice_number'] for row in rows], expected_categories={row['invoice_number']: row['category'] for row in rows})
         except (ValueError, sqlite3.Error, OverflowError) as error:
             self.proposal = None
             self.confirm.configure(state='disabled')
@@ -106,6 +185,7 @@ class MonthlyWorkflow:
         if self.batch_view:
             self.batch_view.window.destroy()
         self.preview.pack_forget()
+        self.other_frame.pack_forget()
         self.total.set('')
         self.proposal = None
         self.confirm.configure(state='disabled')
@@ -158,7 +238,7 @@ class HistoryPanel:
         self.tree.delete(*self.tree.get_children())
         names = {'reserved': '待报销', 'used': '已报销', 'cancelled': '已取消'}
         for row in rows:
-            self.tree.insert('', 'end', iid=str(row['id']), values=(row['id'], row['reimbursement_month'], row['invoice_count'], money(row['work_days'] * row['daily_allowance_fen']), money(row['total_amount_fen']), names[row['status']]))
+            self.tree.insert('', 'end', iid=str(row['id']), values=(row['id'], row['reimbursement_month'], row['invoice_count'], money(row['work_days'] * row['daily_allowance_fen'] + row['other_amount_fen']), money(row['total_amount_fen']), names[row['status']]))
         if selected and self.tree.exists(selected[0]):
             self.tree.selection_set(selected)
 

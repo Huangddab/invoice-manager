@@ -26,6 +26,9 @@ def init_db():
                 remark TEXT NOT NULL DEFAULT ''
             )
         """)
+        invoice_columns = {row[1] for row in conn.execute("PRAGMA table_info(invoices)")}
+        if 'category' not in invoice_columns:
+            conn.execute("ALTER TABLE invoices ADD COLUMN category TEXT NOT NULL DEFAULT 'meal' CHECK (category IN ('meal', 'other'))")
         # 创建报销批次表
         conn.execute("""
             CREATE TABLE IF NOT EXISTS reimbursement_batches (
@@ -40,6 +43,9 @@ def init_db():
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        batch_columns = {row[1] for row in conn.execute("PRAGMA table_info(reimbursement_batches)")}
+        if 'other_amount_fen' not in batch_columns:
+            conn.execute("ALTER TABLE reimbursement_batches ADD COLUMN other_amount_fen INTEGER NOT NULL DEFAULT 0")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS reimbursement_items (
                 batch_id INTEGER NOT NULL,
@@ -69,6 +75,9 @@ def save_invoice(invoice):
         if invoice.get(field) is None or invoice.get(field) == "":
             raise ValueError(f"发票缺少必要字段：{field}")
 
+    category = invoice.get('category', 'meal')
+    if category not in ('meal', 'other'):
+        raise ValueError('无效的发票分类')
     amount_fen = invoice["total_amount"] * 100
 
     if amount_fen != amount_fen.to_integral_value():
@@ -84,9 +93,10 @@ def save_invoice(invoice):
                 invoice_date,
                 buyer,
                 seller,
-                file_path
+                file_path,
+                category
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(invoice_number) DO NOTHING
         """, (
             invoice["invoice_number"],
@@ -95,6 +105,7 @@ def save_invoice(invoice):
             invoice["buyer"],
             invoice["seller"],
             invoice["file_path"],
+            category,
         ))
 
         conn.commit()
@@ -115,6 +126,7 @@ def list_invoices():
                 seller,
                 buyer,
                 file_path,
+                category,
                 is_printed,
                 status,
                 remark
@@ -235,6 +247,7 @@ def create_reimbursement_batch(
     work_days,
     daily_allowance_fen,
     invoice_numbers,
+    expected_categories=None,
 ):
     # 检查月份格式
     try:
@@ -282,7 +295,13 @@ def create_reimbursement_batch(
 
         batch_id = cursor.lastrowid
         # 遍历发票号码，更新发票状态并插入报销项记录
+        other_amount = 0
         for invoice_number in invoice_numbers:
+            invoice = conn.execute('SELECT category, total_amount_fen FROM invoices WHERE invoice_number = ?', (invoice_number,)).fetchone()
+            if invoice and expected_categories is not None and invoice[0] != expected_categories.get(invoice_number):
+                raise ValueError('发票分类已变更，请重新生成方案')
+            if invoice and invoice[0] == 'other':
+                other_amount += invoice[1]
             cursor = conn.execute("""
                 UPDATE invoices
                 SET status = 'reserved'
@@ -303,6 +322,7 @@ def create_reimbursement_batch(
                 VALUES (?, ?)
             """, (batch_id, invoice_number))
 
+        conn.execute('UPDATE reimbursement_batches SET other_amount_fen = ? WHERE id = ?', (other_amount, batch_id))
         conn.commit()
         return batch_id
 
@@ -364,3 +384,21 @@ def reimbursement_invoices(batch_id):
             ON i.invoice_number = v.invoice_number
             WHERE i.batch_id = ? ORDER BY v.invoice_date, v.invoice_number
         """, (batch_id,))]
+
+
+def update_category_batch(invoice_numbers, category):
+    if category not in ('meal', 'other'):
+        raise ValueError('无效的发票分类')
+    numbers = list(dict.fromkeys(invoice_numbers))
+    if not numbers:
+        raise ValueError('请先选择发票')
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        for number in numbers:
+            row = conn.execute('SELECT status FROM invoices WHERE invoice_number = ?', (number,)).fetchone()
+            linked = conn.execute("""SELECT 1 FROM reimbursement_items i JOIN reimbursement_batches b
+                ON b.id = i.batch_id WHERE i.invoice_number = ? AND b.status != 'cancelled'""", (number,)).fetchone()
+            if not row or row[0] in ('reserved', 'used') or linked:
+                raise ValueError('只能调整未预留、未使用发票的分类')
+            conn.execute('UPDATE invoices SET category = ? WHERE invoice_number = ?', (category, number))
+    return True

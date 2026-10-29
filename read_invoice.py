@@ -86,13 +86,16 @@ def parse_invoice(pdf_path):
         "file_path": str(pdf_path.resolve()),
     }
 
-def import_invoices(paths):
+def import_invoices(paths, category="meal"):
     """Validate and keep an original byte-for-byte copy before indexing."""
+    if category not in ('meal', 'other'):
+        raise ValueError('无效的发票分类')
     result = {"added": 0, "duplicates": 0, "errors": []}
     for path in paths:
         path = Path(path)
         try:
             invoice = parse_invoice(path)
+            invoice["category"] = category
             number = invoice["invoice_number"]
             if not number or not re.fullmatch(r"\d{20}", number):
                 raise ValueError("未识别到有效的20位发票号")

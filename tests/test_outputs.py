@@ -1,3 +1,4 @@
+import gc
 import base64
 import hashlib
 from pathlib import Path
@@ -16,6 +17,8 @@ from read_invoice import import_invoices
 
 class OutputTests(unittest.TestCase):
     def setUp(self):
+        # Collect prior destroyed Tk roots on the UI thread before worker tests.
+        gc.collect()
         self.temp = tempfile.TemporaryDirectory()
         self.directory = Path(self.temp.name)
         self.old_db = database.DB_PATH

@@ -1,3 +1,4 @@
+import gc
 import contextlib
 import importlib
 import io
@@ -14,6 +15,8 @@ from read_invoice import import_invoices
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
+        # Collect prior destroyed Tk roots on the UI thread before worker tests.
+        gc.collect()
         self.temp = tempfile.TemporaryDirectory()
         self.original = database.DB_PATH
         database.DB_PATH = Path(self.temp.name) / 'test.db'

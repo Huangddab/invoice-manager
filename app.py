@@ -15,6 +15,8 @@ import database
 from read_invoice import import_invoices
 from invoice_selector import select_invoice_combination
 
+CATEGORY = {"meal": "餐补", "other": "其他"}
+
 STATUS = {"available": "待使用", "reserved": "已预留", "used": "已使用", "unusable": "不可用"}
 
 
@@ -34,11 +36,12 @@ def money(fen):
     return f"{Decimal(fen) / 100:,.2f}"
 
 
-def filter_invoices(invoices, query="", status="全部", printed="全部"):
+def filter_invoices(invoices, query="", status="全部", printed="全部", category="全部"):
     query = query.strip().casefold()
     return [row for row in invoices
             if (not query or query in " ".join(str(row[key]) for key in
                 ("invoice_number", "seller", "buyer", "remark")).casefold())
+            and (category == "全部" or CATEGORY.get(row.get("category", "meal")) == category)
             and (status == "全部" or STATUS.get(row["status"]) == status)
             and (printed == "全部" or bool(row["is_printed"]) == (printed == "已打印"))]
 
@@ -73,6 +76,8 @@ class InvoiceApp:
         self.query = tk.StringVar(root)
         self.status = tk.StringVar(root, "全部")
         self.printed = tk.StringVar(root, "全部")
+        self.category = tk.StringVar(root, "全部")
+        self.import_category = tk.StringVar(root, "餐补")
         self.summary = tk.StringVar(root)
         self.selection_summary = tk.StringVar(root)
         self.month = tk.StringVar(root, date.today().strftime("%Y-%m"))
@@ -105,6 +110,8 @@ class InvoiceApp:
         ttk.Label(header, text="我的发票", style="Title.TLabel").pack(side="left")
         self.import_button = ttk.Button(header, text="＋ 导入 PDF", command=self.choose_import)
         self.import_button.pack(side="right")
+        ttk.Combobox(header, textvariable=self.import_category, values=list(CATEGORY.values()), state="readonly", width=6).pack(side="right", padx=5)
+        ttk.Label(header, text="导入分类").pack(side="right")
         ttk.Button(header, text="扫描发票目录", command=self.scan_folder).pack(side="right", padx=8)
         ttk.Button(header, text="刷新", command=self.refresh).pack(side="right", padx=8)
         ttk.Label(outer, textvariable=self.summary, style="Summary.TLabel").pack(anchor="w", pady=(0, 16))
@@ -113,18 +120,18 @@ class InvoiceApp:
         ttk.Label(filters, text="搜索").pack(side="left")
         search = ttk.Entry(filters, textvariable=self.query, width=32)
         search.pack(side="left", padx=(8, 16))
-        for label, variable, values in (("使用状态", self.status, ["全部", *STATUS.values()]),
+        for label, variable, values in (("分类", self.category, ["全部", *CATEGORY.values()]), ("使用状态", self.status, ["全部", *STATUS.values()]),
                                         ("打印状态", self.printed, ["全部", "未打印", "已打印"])):
             ttk.Label(filters, text=label).pack(side="left")
             ttk.Combobox(filters, textvariable=variable, values=values, state="readonly", width=9).pack(side="left", padx=8)
         ttk.Button(filters, text="重置筛选", command=self.reset_filters).pack(side="right")
         frame = ttk.Frame(outer)
         frame.pack(fill="both", expand=True)
-        columns = ("number", "date", "seller", "amount", "printed", "status", "remark")
+        columns = ("number", "category", "date", "seller", "amount", "printed", "status", "remark")
         self.table = ttk.Treeview(frame, columns=columns, show="headings", selectmode="extended")
         for key, title, width in zip(columns,
-                ("发票号码", "开票日期", "商家名称", "金额（元）", "打印状态", "使用状态", "备注"),
-                (190, 100, 230, 100, 85, 85, 210)):
+                ("发票号码", "分类", "开票日期", "商家名称", "金额（元）", "打印状态", "使用状态", "备注"),
+                (180, 65, 100, 210, 100, 85, 85, 190)):
             self.table.heading(key, text=title)
             self.table.column(key, width=width, minwidth=75, anchor="e" if key == "amount" else "w")
         vertical = ttk.Scrollbar(frame, orient="vertical", command=self.table.yview)
@@ -137,6 +144,11 @@ class InvoiceApp:
         frame.columnconfigure(0, weight=1)
         self.empty = ttk.Label(outer, text="")
         self.empty.pack(anchor="w", pady=6)
+        category_actions = ttk.Frame(outer)
+        category_actions.pack(fill="x", pady=4)
+        ttk.Label(category_actions, text="所选分类：").pack(side="left")
+        for code, label in CATEGORY.items():
+            ttk.Button(category_actions, text=f"移至{label}", command=lambda value=code: self.move_category(value)).pack(side="left", padx=4)
         actions = ttk.Frame(outer)
         actions.pack(fill="x", pady=8)
         self.edit_button = ttk.Button(actions, text="修改备注", command=self.edit_remark)
@@ -168,7 +180,7 @@ class InvoiceApp:
         self.table.bind("<Double-1>", self.edit_remark)
         root.bind("<Control-f>", lambda event: search.focus_set())
         root.bind("<F5>", lambda event: self.refresh())
-        for variable in (self.query, self.status, self.printed):
+        for variable in (self.query, self.status, self.printed, self.category):
             variable.trace_add("write", lambda *args: self.render())
         for variable in (self.month, self.days, self.allowance):
             variable.trace_add("write", lambda *args: self.selection_changed())
@@ -183,11 +195,11 @@ class InvoiceApp:
 
     def render(self):
         selected = set(self.table.selection())
-        self.visible = filter_invoices(self.rows, self.query.get(), self.status.get(), self.printed.get())
+        self.visible = filter_invoices(self.rows, self.query.get(), self.status.get(), self.printed.get(), self.category.get())
         self.table.delete(*self.table.get_children())
         for row in self.visible:
             self.table.insert("", "end", iid=row["invoice_number"], values=(
-                row["invoice_number"], row["invoice_date"], row["seller"], money(row["total_amount_fen"]),
+                row["invoice_number"], CATEGORY[row["category"]], row["invoice_date"], row["seller"], money(row["total_amount_fen"]),
                 "已打印" if row["is_printed"] else "未打印", STATUS.get(row["status"], row["status"]), row["remark"]))
         self.table.selection_set([row["invoice_number"] for row in self.visible if row["invoice_number"] in selected])
         self.summary.set(f"全部 {len(self.rows)} 张  ·  当前显示 {len(self.visible)} 张  ·  当前金额 ¥ {money(sum(r['total_amount_fen'] for r in self.visible))}")
@@ -199,6 +211,7 @@ class InvoiceApp:
         self.query.set("")
         self.status.set("全部")
         self.printed.set("全部")
+        self.category.set("全部")
 
     def select_all(self):
         self.table.selection_set(self.table.get_children())
@@ -282,9 +295,18 @@ class InvoiceApp:
         except OSError as error:
             self.feedback.set(f"无法打开 PDF：{error}")
 
+    def move_category(self, category):
+        selected = self.table.selection()
+        if not selected:
+            self.feedback.set('请先选择发票。')
+            return
+        self.apply_change(lambda: database.update_category_batch(selected, category), f'已移至{CATEGORY[category]}。')
+        self.workflow.refresh_other()
+
     def workflow_changed(self):
         self.refresh()
         self.history.reload()
+        self.workflow.refresh_other()
 
     def open_batch(self, batch_id):
         if self.workflow.open_batch(batch_id):
@@ -323,12 +345,13 @@ class InvoiceApp:
     def start_import(self, paths):
         if self.importing:
             return
+        category = next(code for code, label in CATEGORY.items() if label == self.import_category.get())
         self.importing = True
         self.import_button.configure(state="disabled")
         self.feedback.set(f"正在读取 {len(paths)} 个文件，请稍候…")
         def worker():
             try:
-                self.results.put(import_invoices(paths))
+                self.results.put(import_invoices(paths, category))
             except Exception as error:
                 self.results.put({"added": 0, "duplicates": 0, "errors": [("导入失败", str(error))]})
         threading.Thread(target=worker, daemon=True).start()
@@ -343,6 +366,7 @@ class InvoiceApp:
         self.importing = False
         self.import_button.configure(state="normal")
         self.refresh()
+        self.workflow.refresh_other()
         summary = f"导入完成：新增 {result['added']} 张，重复跳过 {result['duplicates']} 张，失败 {len(result['errors'])} 张。"
         self.feedback.set(summary)
         self.import_errors.pack_forget()
