@@ -1,0 +1,10 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+# Managed originals are personal data. Back up together with invoices.db.
+managed_pdfs/
+# Generated output
+exports/
+.pytest_cache/

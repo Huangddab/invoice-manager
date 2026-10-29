@@ -18,6 +18,13 @@ from invoice_selector import select_invoice_combination
 STATUS = {"available": "待使用", "reserved": "已预留", "used": "已使用", "unusable": "不可用"}
 
 
+def open_document(path):
+    if sys.platform == "win32":
+        os.startfile(str(Path(path).resolve()))
+    else:
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(Path(path).resolve())])
+
+
 def money(fen):
     return f"{Decimal(fen) / 100:,.2f}"
 
@@ -26,7 +33,7 @@ def filter_invoices(invoices, query="", status="全部", printed="全部"):
     query = query.strip().casefold()
     return [row for row in invoices
             if (not query or query in " ".join(str(row[key]) for key in
-                ("invoice_number", "seller", "remark")).casefold())
+                ("invoice_number", "seller", "buyer", "remark")).casefold())
             and (status == "全部" or STATUS.get(row["status"]) == status)
             and (printed == "全部" or bool(row["is_printed"]) == (printed == "已打印"))]
 
@@ -96,14 +103,14 @@ class InvoiceApp:
             ttk.Label(filters, text=label).pack(side="left")
             ttk.Combobox(filters, textvariable=variable, values=values, state="readonly", width=9).pack(side="left", padx=8)
         ttk.Button(filters, text="重置筛选", command=self.reset_filters).pack(side="right")
-        ttk.Label(outer, text="支持搜索发票号码、商家和备注；按 Ctrl / Shift 可多选，双击可修改备注。").pack(anchor="w", pady=(0, 8))
+        ttk.Label(outer, text="库存可搜索、筛选和修改备注；月度报销请直接点击「自动凑票并创建报销单」，无需手选。").pack(anchor="w", pady=(0, 8))
         reimbursement = ttk.LabelFrame(outer, text="报销选票", padding=10)
         reimbursement.pack(fill="x", pady=(0, 12))
         for title, variable, width in (("月份", self.month, 9), ("报销天数", self.days, 5), ("每日标准（元）", self.allowance, 8)):
             ttk.Label(reimbursement, text=title).pack(side="left", padx=(0, 4))
             ttk.Entry(reimbursement, textvariable=variable, width=width).pack(side="left", padx=(0, 12))
-        ttk.Button(reimbursement, text="自动推荐选票", command=self.recommend).pack(side="left", padx=4)
-        ttk.Button(reimbursement, text="用所选创建报销单", command=self.create_batch).pack(side="left", padx=4)
+        ttk.Button(reimbursement, text="预览自动凑票", command=self.recommend).pack(side="left", padx=4)
+        ttk.Button(reimbursement, text="自动凑票并创建报销单", command=self.create_batch).pack(side="left", padx=4)
         ttk.Button(reimbursement, text="报销记录", command=self.show_batches).pack(side="right")
         ttk.Label(outer, textvariable=self.target_summary).pack(anchor="w", pady=(0, 8))
         frame = ttk.Frame(outer)
@@ -132,7 +139,7 @@ class InvoiceApp:
         self.open_button = ttk.Button(actions, text="打开原 PDF", command=self.open_pdf)
         self.open_button.pack(side="left", padx=6)
         self.batch_buttons = []
-        for text, printed in (("标记已打印", True), ("标记未打印", False)):
+        for text, printed in (("重置为未打印", False),):
             button = ttk.Button(actions, text=text, command=lambda value=printed: self.mark_printed(value))
             button.pack(side="left", padx=6)
             self.batch_buttons.append(button)
@@ -239,15 +246,18 @@ class InvoiceApp:
         selected = self.table.selection()
         if len(selected) != 1:
             return
-        path = database.get_invoice_file_path(selected[0])
+        from invoice_files import original_path
+        try:
+            row = next(row for row in self.rows if row["invoice_number"] == selected[0])
+            path = original_path(row)
+        except OSError as error:
+            messagebox.showwarning("找不到原 PDF", str(error), parent=self.root)
+            return
         if not path or not Path(path).is_file():
             messagebox.showwarning("找不到原 PDF", "原文件可能已移动或删除，请核对文件位置。", parent=self.root)
             return
         try:
-            if sys.platform == "win32":
-                os.startfile(str(Path(path).resolve()))
-            else:
-                subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(Path(path).resolve())])
+            open_document(path)
         except OSError as error:
             messagebox.showerror("无法打开 PDF", str(error), parent=self.root)
 
@@ -266,18 +276,16 @@ class InvoiceApp:
         self.table.selection_set([row["invoice_number"] for row in recommended])
         self.table.see(recommended[0]["invoice_number"])
         self.selection_changed()
-        self.feedback.set("已从全部待使用发票中推荐组合；可手动调整选择，再点击「用所选创建报销单」。尚未预留发票。")
+        self.feedback.set("这是自动凑票预览，尚未预留；点击「自动凑票并创建报销单」确认。库存勾选不影响自动凑票。")
 
     def create_batch(self):
-        selected = self.table.selection()
-        if not selected:
-            messagebox.showinfo("请先选择发票", "手动选择发票，或点击「自动推荐选票」。", parent=self.root)
-            return
         try:
             month, days, allowance = reimbursement_inputs(self.month.get().strip(), self.days.get().strip(), self.allowance.get().strip())
-            current = {row["invoice_number"]: row for row in database.list_invoices()}
-            if any(number not in current or current[number]["status"] != "available" for number in selected):
-                raise ValueError("只能用待使用发票创建报销单，请刷新后重新选择")
+            recommended = select_invoice_combination(database.list_invoices(), days * allowance)
+            if not recommended:
+                raise ValueError("没有待使用发票，请先导入发票；已预留、已使用和不可用发票不会参与凑票")
+            selected = [row["invoice_number"] for row in recommended]
+            current = {row["invoice_number"]: row for row in recommended}
             total = sum(current[number]["total_amount_fen"] for number in selected)
             details = "\n".join(f"{current[number]['seller']} · ¥ {money(current[number]['total_amount_fen'])}" for number in selected[:10])
             if len(selected) > 10:
@@ -289,7 +297,9 @@ class InvoiceApp:
             messagebox.showerror("无法创建报销单", str(error), parent=self.root)
             return
         self.refresh()
-        self.feedback.set(f"已创建报销单 #{batch_id}，预留 {len(selected)} 张发票。请在「报销记录」中管理。")
+        self.feedback.set(f"已自动创建报销单 #{batch_id}，预留 {len(selected)} 张发票。勾选仅用于打印和导出。")
+        from batch_view import BatchView
+        BatchView(self.root, batch_id, self.refresh)
 
     def show_batches(self):
         window = tk.Toplevel(self.root)
@@ -310,6 +320,15 @@ class InvoiceApp:
             tree.delete(*tree.get_children())
             for batch in batches:
                 tree.insert("", "end", iid=str(batch["id"]), values=(batch["id"], batch["reimbursement_month"], batch["invoice_count"], money(batch["work_days"] * batch["daily_allowance_fen"]), money(batch["total_amount_fen"]), names[batch["status"]]))
+        def details(event=None):
+            selected = tree.selection()
+            if selected:
+                from batch_view import BatchView
+                try:
+                    BatchView(window, int(selected[0]), self.refresh)
+                except sqlite3.Error as error:
+                    messagebox.showerror("读取明细失败", str(error), parent=window)
+        tree.bind("<Double-1>", details)
         def change(action):
             selected = tree.selection()
             if not selected:
@@ -328,13 +347,17 @@ class InvoiceApp:
             self.feedback.set(f"报销单 #{selected[0]} 已{'完成报销' if action == 'used' else '取消'}")
         controls = ttk.Frame(window, padding=12)
         controls.pack(fill="x")
+        ttk.Button(controls, text="查看明细 / 打印 / 导出", command=details).pack(side="left", padx=6)
         ttk.Button(controls, text="完成报销", command=lambda: change("used")).pack(side="left", padx=6)
         ttk.Button(controls, text="取消报销单", command=lambda: change("cancelled")).pack(side="left", padx=6)
         ttk.Button(controls, text="刷新", command=reload).pack(side="right")
         reload()
 
     def scan_folder(self):
-        folder = Path(__file__).resolve().parent / "invoices"
+        chosen = filedialog.askdirectory(parent=self.root, title="选择需要扫描新增 PDF 的文件夹")
+        if not chosen:
+            return
+        folder = Path(chosen)
         paths = sorted(path for path in folder.glob("*") if path.is_file() and path.suffix.lower() == ".pdf")
         if not paths:
             self.feedback.set("发票目录中没有 PDF，请点击「导入 PDF」选择文件。")

@@ -107,6 +107,23 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(sum(row['total_amount_fen'] for row in selected), 50000)
         self.assertEqual(select_invoice_combination([rows[-1]], 50000), [])
 
+    def test_nearest_above_and_below(self):
+        from invoice_selector import select_invoice_combination
+        def rows(amounts):
+            return [dict(invoice_number=str(i), invoice_date='2026-10-01',
+                         total_amount_fen=value, status='available') for i, value in enumerate(amounts)]
+        self.assertEqual(sum(r['total_amount_fen'] for r in select_invoice_combination(rows([49000, 90000]), 50000)), 49000)
+        self.assertEqual(sum(r['total_amount_fen'] for r in select_invoice_combination(rows([51000, 90000]), 50000)), 51000)
+
+    def test_used_invoice_cannot_return_to_inventory(self):
+        import_invoices(self.pdfs)
+        number = database.list_invoices()[0]['invoice_number']
+        database.update_status_batch([number], 'used')
+        database.init_db()
+        self.assertEqual(database.list_invoices()[0]['status'], 'used')
+        with self.assertRaises(ValueError):
+            database.update_status_batch([number], 'available')
+
     def test_reimbursement_inputs(self):
         self.assertEqual(reimbursement_inputs('2026-10', '20', '25.50'), ('2026-10', 20, 2550))
         for values in [('2026-1', '20', '25'), ('2026-13', '20', '25'),
@@ -128,6 +145,7 @@ class WorkflowTests(unittest.TestCase):
         with patch('app.messagebox.askyesno', return_value=False):
             app.create_batch()
         self.assertEqual(database.list_reimbursement_batches(), [])
+        app.table.selection_remove(*app.table.selection())
         with patch('app.messagebox.askyesno', return_value=True):
             app.create_batch()
         self.assertEqual(len(database.list_reimbursement_batches()), 1)

@@ -113,6 +113,7 @@ def list_invoices():
                 total_amount_fen,
                 invoice_date,
                 seller,
+                buyer,
                 file_path,
                 is_printed,
                 status,
@@ -195,6 +196,9 @@ def update_status_batch(invoice_numbers, status):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("BEGIN IMMEDIATE")
         for number in numbers:
+            current = conn.execute("SELECT status FROM invoices WHERE invoice_number = ?", (number,)).fetchone()
+            if current and current[0] == 'used' and status != 'used':
+                raise ValueError("已使用发票不能恢复库存，每张发票只能整张使用一次")
             linked = conn.execute("""
                 SELECT 1 FROM reimbursement_items i
                 JOIN reimbursement_batches b ON b.id = i.batch_id
@@ -341,3 +345,18 @@ def finish_reimbursement_batch(batch_id, action):
                 raise ValueError('发票状态与报销单不一致，未保存任何修改')
         conn.execute('UPDATE reimbursement_batches SET status = ? WHERE id = ?', (action, batch_id))
     return True
+
+
+def relink_invoice_file(number, path):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE invoices SET file_path = ? WHERE invoice_number = ?", (path, number))
+
+
+def reimbursement_invoices(batch_id):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(row) for row in conn.execute("""
+            SELECT v.* FROM invoices v JOIN reimbursement_items i
+            ON i.invoice_number = v.invoice_number
+            WHERE i.batch_id = ? ORDER BY v.invoice_date, v.invoice_number
+        """, (batch_id,))]

@@ -3,6 +3,10 @@ from   pypdf import PdfReader
 from decimal import Decimal
 from datetime import date
 import re
+import shutil
+import tempfile
+import os
+import database
 from database import init_db,save_invoice
 
 # 提取pdf文本
@@ -83,15 +87,35 @@ def parse_invoice(pdf_path):
     }
 
 def import_invoices(paths):
-    """Import independently so one unreadable PDF does not stop the batch."""
+    """Validate and keep an original byte-for-byte copy before indexing."""
     result = {"added": 0, "duplicates": 0, "errors": []}
     for path in paths:
         path = Path(path)
         try:
             invoice = parse_invoice(path)
+            number = invoice["invoice_number"]
+            if not number or not re.fullmatch(r"\d{20}", number):
+                raise ValueError("未识别到有效的20位发票号")
+            required = ("total_amount", "invoice_date", "buyer", "seller")
+            if any(invoice.get(key) is None or invoice.get(key) == "" for key in required):
+                raise ValueError("发票信息不完整，请核对金额、日期、购买方和销售方")
+            directory = database.DB_PATH.parent / "managed_pdfs"
+            directory.mkdir(parents=True, exist_ok=True)
+            target = directory / f"{number}.pdf"
+            # Existing managed originals are immutable; renamed duplicates never replace them.
+            if not target.exists():
+                handle, temporary = tempfile.mkstemp(dir=directory, suffix=".pdf")
+                os.close(handle)
+                try:
+                    shutil.copyfile(path, temporary)
+                    os.replace(temporary, target)
+                finally:
+                    Path(temporary).unlink(missing_ok=True)
+            invoice["file_path"] = str(target.resolve())
             if save_invoice(invoice):
                 result["added"] += 1
             else:
+                database.relink_invoice_file(number, str(target.resolve()))
                 result["duplicates"] += 1
         except Exception as error:
             result["errors"].append((path.name, str(error)))
@@ -111,35 +135,9 @@ def scan_invoice_folder():
         if path.is_file() and path.suffix.lower() == ".pdf"
     )
 
-    result = {
-        "added": 0,
-        "duplicate": 0,
-        "errors": [],
-    }
-
-    for pdf_path in pdf_files:
-        try:
-            invoice = parse_invoice(pdf_path)
-        except Exception as error:
-            result["errors"].append(
-                f"{pdf_path.name}：读取或解析失败，{error}"
-            )
-            continue
-
-        try:
-            saved = save_invoice(invoice)
-        except ValueError as error:
-            result["errors"].append(
-                f"{pdf_path.name}：{error}"
-            )
-            continue
-
-        if saved:
-            result["added"] += 1
-        else:
-            result["duplicate"] += 1
-
-    return result
+    imported = import_invoices(pdf_files)
+    return {"added": imported["added"], "duplicate": imported["duplicates"],
+            "errors": [f"{name}：{error}" for name, error in imported["errors"]]}
 
 
 if __name__ == "__main__":
