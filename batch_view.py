@@ -9,7 +9,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import database
-from invoice_files import batch_export_name, export_zip, original_path, prepare_print_pdf, print_command, submit_print
+from invoice_files import display_invoice_number, batch_export_name, export_zip, original_path, prepare_print_pdf, print_command, submit_print
 
 
 def amount(fen):
@@ -91,7 +91,7 @@ class BatchView:
         self.tree.delete(*self.tree.get_children())
         for row in self.rows:
             self.tree.insert('', 'end', iid=row['invoice_number'], values=(
-                '☑' if row['invoice_number'] in self.checked else '☐', '餐补' if row['category'] == 'meal' else '其他', row['invoice_number'], row['invoice_date'],
+                '☑' if row['invoice_number'] in self.checked else '☐', '餐补' if row['category'] == 'meal' else '其他', display_invoice_number(row), row['invoice_date'],
                 row['buyer'], row['seller'], amount(row['total_amount_fen']), '已打印' if row['is_printed'] else '未打印', row['remark']))
         if self.rows:
             number = selected[0] if selected and self.tree.exists(selected[0]) else self.rows[0]['invoice_number']

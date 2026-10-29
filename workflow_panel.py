@@ -4,6 +4,7 @@ from tkinter import ttk
 import tkinter as tk
 
 import database
+from invoice_files import display_invoice_number
 from batch_view import BatchView
 from invoice_selector import select_invoice_combination
 
@@ -69,7 +70,7 @@ class MonthlyWorkflow:
         self.other_checked.intersection_update(row['invoice_number'] for row in self.other_rows)
         self.other_tree.delete(*self.other_tree.get_children())
         for row in self.other_rows:
-            self.other_tree.insert('', 'end', iid=row['invoice_number'], values=('☑' if row['invoice_number'] in self.other_checked else '☐', row['invoice_number'], row['seller'], money(row['total_amount_fen'])))
+            self.other_tree.insert('', 'end', iid=row['invoice_number'], values=('☑' if row['invoice_number'] in self.other_checked else '☐', display_invoice_number(row), row['seller'], money(row['total_amount_fen'])))
         self.other_button.configure(text=f'选择其他发票（{len(self.other_checked)} 张）')
         if previous != self.other_checked:
             self.inputs_changed()
@@ -152,7 +153,7 @@ class MonthlyWorkflow:
         self.preview.pack(fill='both', expand=True, padx=12, pady=12)
         self.preview.delete(*self.preview.get_children())
         for row in rows:
-            self.preview.insert('', 'end', values=('餐补' if row['category'] == 'meal' else '其他', row['invoice_number'], row['seller'], row['invoice_date'], money(row['total_amount_fen'])))
+            self.preview.insert('', 'end', values=('餐补' if row['category'] == 'meal' else '其他', display_invoice_number(row), row['seller'], row['invoice_date'], money(row['total_amount_fen'])))
         total = sum(row['total_amount_fen'] for row in rows)
         other_total = sum(row['total_amount_fen'] for row in others)
         target = days * allowance + other_total

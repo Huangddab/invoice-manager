@@ -12,6 +12,7 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 
 import database
+from invoice_files import display_invoice_number
 from read_invoice import import_invoices
 from invoice_selector import select_invoice_combination
 
@@ -39,8 +40,8 @@ def money(fen):
 def filter_invoices(invoices, query="", status="全部", printed="全部", category="全部"):
     query = query.strip().casefold()
     return [row for row in invoices
-            if (not query or query in " ".join(str(row[key]) for key in
-                ("invoice_number", "seller", "buyer", "remark")).casefold())
+            if (not query or query in " ".join(str(row.get(key, "")) for key in
+                ("invoice_number", "invoice_serial", "invoice_code", "seller", "buyer", "remark")).casefold())
             and (category == "全部" or CATEGORY.get(row.get("category", "meal")) == category)
             and (status == "全部" or STATUS.get(row["status"]) == status)
             and (printed == "全部" or bool(row["is_printed"]) == (printed == "已打印"))]
@@ -199,7 +200,7 @@ class InvoiceApp:
         self.table.delete(*self.table.get_children())
         for row in self.visible:
             self.table.insert("", "end", iid=row["invoice_number"], values=(
-                row["invoice_number"], CATEGORY[row["category"]], row["invoice_date"], row["seller"], money(row["total_amount_fen"]),
+                display_invoice_number(row), CATEGORY[row["category"]], row["invoice_date"], row["seller"], money(row["total_amount_fen"]),
                 "已打印" if row["is_printed"] else "未打印", STATUS.get(row["status"], row["status"]), row["remark"]))
         self.table.selection_set([row["invoice_number"] for row in self.visible if row["invoice_number"] in selected])
         self.summary.set(f"全部 {len(self.rows)} 张  ·  当前显示 {len(self.visible)} 张  ·  当前金额 ¥ {money(sum(r['total_amount_fen'] for r in self.visible))}")

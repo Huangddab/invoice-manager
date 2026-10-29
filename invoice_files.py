@@ -25,12 +25,18 @@ def original_path(invoice):
     return path
 
 
+def display_invoice_number(invoice):
+    serial = invoice.get('invoice_serial') or invoice['invoice_number']
+    code = invoice.get('invoice_code')
+    return f'{serial}（代码{code}）' if code else serial
+
+
 def export_name(invoice):
     seller = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', invoice['seller']).strip().rstrip('. ')
     seller = seller or '未知销售方'
     amount = format(Decimal(invoice['total_amount_fen']) / 100, '.2f').rstrip('0').rstrip('.')
     # Strip zeroes only after the decimal point (428.00 -> 428, 400.00 -> 400).
-    number = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', invoice['invoice_number'])
+    number = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', invoice.get('invoice_serial') or invoice['invoice_number'])
     return f'{number}_{seller}_{amount}.pdf'
 
 

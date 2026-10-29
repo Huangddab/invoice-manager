@@ -21,15 +21,30 @@ def read_invoice_text(pdf_path):
 
     return "\n".join(page_text)
 
-# 解析发票号
-def extract_invoice_number(text):
+def extract_invoice_identity(text):
+    """Return a collision-safe key, optional legacy code, and real number."""
+    labelled = re.search(r"发\s*票\s*(?:号\s*码|号)\s*[：:]\s*(\d{20}|\d{8})(?!\d)", text)
+    if labelled:
+        serial = labelled.group(1)
+        if len(serial) == 20:
+            return serial, "", serial
+        code_match = re.search(r"发\s*票\s*代\s*码\s*[：:]\s*(\d{12}|\d{10})(?!\d)", text)
+        if code_match:
+            code = code_match.group(1)
+            return code + serial, code, serial
+        return None, "", serial
     match = re.search(r"(?<!\d)(\d{20})(?!\d)", text)
-    if match:
-        return match.group(1)
-    return None
+    return (match.group(1), "", match.group(1)) if match else (None, "", "")
+
+
+def extract_invoice_number(text):
+    return extract_invoice_identity(text)[0]
 
 # 解析价税总价
 def extract_total_amount(text):
+    labelled = re.search(r"[（(]\s*小\s*写\s*[）)]\s*[¥￥]\s*([0-9,]+\.[0-9]{2})(?![0-9])", text)
+    if labelled:
+        return Decimal(labelled.group(1).replace(',', ''))
     pattern = r"[圆元][^\n¥￥]*[¥￥]\s*([0-9,]+\.[0-9]{2})(?![0-9])"
     match = re.search(pattern, text)
 
@@ -40,7 +55,7 @@ def extract_total_amount(text):
 
 # 提取开票日期
 def extract_invoice_date(text):
-    match = re.search(r"([0-9]{4})年\s*([0-9]{1,2})月\s*([0-9]{1,2})日",text)
+    match = re.search(r"([0-9]{4})\s*年\s*([0-9]{1,2})\s*月\s*([0-9]{1,2})\s*日",text)
     if match is None:
         return None
 
@@ -66,6 +81,10 @@ def extract_company_names(text):
         match = re.search(fallback_pattern, text)
 
     if match is None:
+        # Traditional invoices place buyer and seller on separate name rows.
+        names = re.findall(r"^[ \t]*名[ \t]*称[：:][ \t]*([^\n]+)", text, re.MULTILINE)
+        if len(names) == 2:
+            return tuple(re.split(r"[ \t]{2,}", name.strip())[0].strip() for name in names)
         return None,None
 
     buyer = match.group(1).strip()
@@ -74,17 +93,44 @@ def extract_company_names(text):
     return buyer,seller
 
 # 解析整张发票，返回字典形式的结果
-def parse_invoice(pdf_path):
-    text = read_invoice_text(pdf_path)
-    buyer,seller = extract_company_names(text)
-    return{
-        "invoice_number": extract_invoice_number(text),
+def parse_invoice_text(text, pdf_path):
+    buyer, seller = extract_company_names(text)
+    number, code, serial = extract_invoice_identity(text)
+    return {
+        "invoice_number": number,
+        "invoice_code": code,
+        "invoice_serial": serial,
         "total_amount": extract_total_amount(text),
         "invoice_date": extract_invoice_date(text),
         "buyer": buyer,
         "seller": seller,
-        "file_path": str(pdf_path.resolve()),
+        "file_path": str(Path(pdf_path).resolve()),
     }
+
+
+def parse_invoice(pdf_path):
+    pdf_path = Path(pdf_path)
+    required = ("invoice_number", "total_amount", "invoice_date", "buyer", "seller")
+    candidates = []
+    extraction_error = None
+    try:
+        candidates.append(parse_invoice_text(read_invoice_text(pdf_path), pdf_path))
+    except Exception as error:
+        extraction_error = error
+    if candidates and all(candidates[0][field] is not None and candidates[0][field] != "" for field in required):
+        return candidates[0]
+    try:
+        import fitz
+        with fitz.open(pdf_path) as document:
+            text = "\n".join(page.get_text(sort=True) for page in document)
+        candidates.append(parse_invoice_text(text, pdf_path))
+    except Exception as error:
+        extraction_error = error
+    if not candidates:
+        raise ValueError(f"PDF 无法读取：{extraction_error}")
+    # Keep fields from one coherent extraction instead of mixing invoice identities.
+    return max(candidates, key=lambda row: sum(row[field] is not None and row[field] != "" for field in required))
+
 
 def import_invoices(paths, category="meal"):
     """Validate and keep an original byte-for-byte copy before indexing."""
@@ -97,11 +143,13 @@ def import_invoices(paths, category="meal"):
             invoice = parse_invoice(path)
             invoice["category"] = category
             number = invoice["invoice_number"]
-            if not number or not re.fullmatch(r"\d{20}", number):
-                raise ValueError("未识别到有效的20位发票号")
+            if not number or not re.fullmatch(r"\d{18}|\d{20}", number):
+                raise ValueError("未识别到有效发票号：数电发票需20位号码，传统发票需代码及8位号码")
             required = ("total_amount", "invoice_date", "buyer", "seller")
-            if any(invoice.get(key) is None or invoice.get(key) == "" for key in required):
-                raise ValueError("发票信息不完整，请核对金额、日期、购买方和销售方")
+            names = {"total_amount": "价税合计", "invoice_date": "开票日期", "buyer": "购买方", "seller": "销售方"}
+            missing = [names[key] for key in required if invoice.get(key) is None or invoice.get(key) == ""]
+            if missing:
+                raise ValueError("未识别到：" + "、".join(missing) + "；请核对 PDF 是否有可提取文字")
             directory = database.DB_PATH.parent / "managed_pdfs"
             directory.mkdir(parents=True, exist_ok=True)
             target = directory / f"{number}.pdf"

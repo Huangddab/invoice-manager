@@ -29,6 +29,9 @@ def init_db():
         invoice_columns = {row[1] for row in conn.execute("PRAGMA table_info(invoices)")}
         if 'category' not in invoice_columns:
             conn.execute("ALTER TABLE invoices ADD COLUMN category TEXT NOT NULL DEFAULT 'meal' CHECK (category IN ('meal', 'other'))")
+        for column in ('invoice_code', 'invoice_serial'):
+            if column not in invoice_columns:
+                conn.execute(f"ALTER TABLE invoices ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
         # 创建报销批次表
         conn.execute("""
             CREATE TABLE IF NOT EXISTS reimbursement_batches (
@@ -94,9 +97,11 @@ def save_invoice(invoice):
                 buyer,
                 seller,
                 file_path,
-                category
+                category,
+                invoice_code,
+                invoice_serial
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(invoice_number) DO NOTHING
         """, (
             invoice["invoice_number"],
@@ -106,6 +111,8 @@ def save_invoice(invoice):
             invoice["seller"],
             invoice["file_path"],
             category,
+            invoice.get("invoice_code", ""),
+            invoice.get("invoice_serial", ""),
         ))
 
         conn.commit()
@@ -127,6 +134,8 @@ def list_invoices():
                 buyer,
                 file_path,
                 category,
+                invoice_code,
+                invoice_serial,
                 is_printed,
                 status,
                 remark
