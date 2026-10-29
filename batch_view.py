@@ -6,7 +6,7 @@ import sys
 import tempfile
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, ttk
 
 import database
 from invoice_files import export_zip, original_path, prepare_print_pdf, print_command, submit_print
@@ -22,9 +22,10 @@ class BatchView:
         self.changed = changed
         self.checked = set()
         self.busy = False
-        self.window = tk.Toplevel(parent)
-        self.window.title(f'报销单 #{batch_id} · 勾选打印与导出')
-        self.window.geometry('1120x600')
+        self.window = ttk.Frame(parent)
+        self.window.pack(fill='both', expand=True)
+        self.pending_print = None
+        self.pending_action = None
         self.header = tk.StringVar(self.window)
         self.summary = tk.StringVar(self.window)
         self.feedback = tk.StringVar(self.window, '勾选仅用于打印和导出；这些操作不会确认使用发票。')
@@ -38,7 +39,6 @@ class BatchView:
         self.print_button = ttk.Button(controls, text='批量打印 / 重新打印', command=self.print_checked)
         self.print_button.pack(side='right')
         frame = ttk.Frame(self.window, padding=12)
-        frame.pack(fill='both', expand=True)
         columns = ('check', 'number', 'date', 'buyer', 'seller', 'amount', 'printed', 'remark')
         self.tree = ttk.Treeview(frame, columns=columns, show='headings', selectmode='browse')
         for key, title, width in zip(columns, ('勾选', '发票号码', '开票日期', '购买方', '销售方', '真实金额', '打印状态', '备注'),
@@ -58,17 +58,31 @@ class BatchView:
         ttk.Label(self.window, textvariable=self.summary, padding=(12, 4)).pack(anchor='w')
         ttk.Label(self.window, text='打印固定：A5 · 横向 · 黑白 · 每张票一页 · 等比例完整缩放（多页 PDF 需人工核对）', padding=(12, 4)).pack(anchor='w')
         ttk.Label(self.window, textvariable=self.feedback, padding=12, wraplength=1000).pack(anchor='w')
+        self.confirmation = ttk.Frame(self.window, padding=(12, 4))
+        self.confirmation.pack(fill='x')
+        self.confirm_button = ttk.Button(self.confirmation, text='确认', command=self.confirm_pending)
+        self.dismiss_button = ttk.Button(self.confirmation, text='取消 / 未全部成功', command=self.dismiss_pending)
+        lifecycle = ttk.Frame(self.window, padding=12)
+        lifecycle.pack(fill='x')
+        self.finish_button = ttk.Button(lifecycle, text='确认已报销', command=lambda: self.request_finish('used'))
+        self.finish_button.pack(side='right', padx=6)
+        self.cancel_button = ttk.Button(lifecycle, text='取消此报销单', command=lambda: self.request_finish('cancelled'))
+        self.cancel_button.pack(side='right', padx=6)
         self.reload()
         self.check_all(True)
+        frame.pack(fill='both', expand=True)
 
     def reload(self):
         batches = database.list_reimbursement_batches()
         batch = next(row for row in batches if row['id'] == self.batch_id)
+        self.batch_status = batch['status']
         self.rows = database.reimbursement_invoices(self.batch_id)
         target = batch['work_days'] * batch['daily_allowance_fen']
         total = sum(row['total_amount_fen'] for row in self.rows)
         state = {'reserved': '待报销（已预留）', 'used': '已报销', 'cancelled': '已取消'}[batch['status']]
         self.header.set(f"{batch['reimbursement_month']} · 报销单 #{self.batch_id} · {state}\n目标 ¥ {amount(target)}  |  {len(self.rows)} 张，合计 ¥ {amount(total)}  |  差额 ¥ {amount(total-target)}")
+        for button in (self.finish_button, self.cancel_button):
+            button.configure(state='normal' if self.batch_status == 'reserved' else 'disabled')
         self.render()
 
     def render(self):
@@ -111,7 +125,7 @@ class BatchView:
     def require_rows(self):
         rows = self.selected_rows()
         if not rows:
-            messagebox.showinfo('请勾选发票', '先勾选要打印或导出的发票。', parent=self.window)
+            self.feedback.set('请先勾选要打印或导出的发票。')
         return rows
 
     def export(self):
@@ -125,7 +139,7 @@ class BatchView:
         try:
             count = export_zip(rows, path)
         except (OSError, ValueError) as error:
-            messagebox.showerror('导出失败', str(error), parent=self.window)
+            self.feedback.set(f'导出失败：{error}')
             return
         self.feedback.set(f'已导出 {count} 张原始 PDF：{path}。打印及使用状态均未改变。')
 
@@ -138,10 +152,11 @@ class BatchView:
             from app import open_document
             open_document(original_path(row))
         except OSError as error:
-            messagebox.showerror('无法打开原 PDF', str(error), parent=self.window)
+            self.feedback.set(f'无法打开原 PDF：{error}')
 
     def print_checked(self):
-        if self.busy:
+        if self.busy or self.pending_print is not None or self.pending_action is not None:
+            self.feedback.set('请先处理下方的确认操作。')
             return
         rows = self.require_rows()
         if not rows:
@@ -161,10 +176,7 @@ class BatchView:
                 command = print_command(pdf, executable)
         except OSError as error:
             temporary.cleanup()
-            messagebox.showerror('无法打印', str(error), parent=self.window)
-            return
-        if not messagebox.askokcancel('确认批量打印', f'将打印 {len(rows)} 张发票。\n规格：A5、横向、黑白、每张一页、完整缩放。\n请确认打印机装有 A5 纸，并在打印对话框检查设置。\n取消或失败后不要确认打印成功。', parent=self.window):
-            temporary.cleanup()
+            self.feedback.set(f'无法打印：{error}')
             return
         self.busy = True
         self.print_button.configure(state='disabled')
@@ -194,18 +206,55 @@ class BatchView:
             self.busy = False
             self.print_button.configure(state='normal')
             if error is not None:
-                self.feedback.set('打印失败，未修改打印状态。')
-                messagebox.showerror('打印失败', str(error), parent=self.window)
+                self.feedback.set(f'打印失败：{error}。未修改打印状态。')
                 return
-            if messagebox.askyesno('请核对实际出纸结果', f'勾选的 {len(rows)} 张发票是否全部实际打印成功？\n\n仅在核对全部成功后选「是」。\n取消打印、未出纸或部分失败请选择「否」，状态不会改变，可重新勾选重打。', parent=self.window):
-                try:
-                    database.update_printed_batch([row['invoice_number'] for row in rows], True)
-                except (ValueError, database.sqlite3.Error) as error:
-                    messagebox.showerror('打印状态保存失败', str(error), parent=self.window)
-                    return
-                self.reload()
-                self.changed()
-                self.feedback.set('已根据你的确认标记已打印；报销使用状态未改变。')
-            else:
-                self.feedback.set('未确认全部打印成功，打印状态保持不变。')
+            self.pending_print = [row['invoice_number'] for row in rows]
+            self.feedback.set(f'请核对实际出纸：本次 {len(rows)} 张是否全部打印成功？取消、未出纸或部分失败请选择「未全部成功」。')
+            self.show_confirmation('全部实际打印成功')
         self.window.after(100, poll)
+
+
+    def show_confirmation(self, label):
+        self.confirm_button.configure(text=label)
+        self.confirm_button.pack(side='left', padx=4)
+        self.dismiss_button.pack(side='left', padx=4)
+
+    def dismiss_pending(self):
+        self.pending_print = None
+        self.pending_action = None
+        self.confirm_button.pack_forget()
+        self.dismiss_button.pack_forget()
+        self.feedback.set('已取消确认，打印和报销状态均未改变。')
+
+    def request_finish(self, action):
+        if self.busy or self.pending_print is not None:
+            self.feedback.set('请先核对本次打印结果，再处理报销单。')
+            return
+        self.pending_action = action
+        if action == 'used':
+            self.feedback.set('确认这张报销单已实际用于报销？整单发票将标记已使用，不能再次使用。打印或导出不会代替此确认。')
+            self.show_confirmation('确认整单已报销')
+        else:
+            self.feedback.set('取消此报销单后，整单发票恢复待使用。是否继续？')
+            self.show_confirmation('确认取消并释放预留')
+
+    def confirm_pending(self):
+        try:
+            if self.pending_print is not None:
+                database.update_printed_batch(self.pending_print, True)
+                feedback = '已根据实际出纸确认标记已打印；报销状态未改变。'
+            elif self.pending_action is not None:
+                database.finish_reimbursement_batch(self.batch_id, self.pending_action)
+                feedback = '已确认报销，整单发票已使用。' if self.pending_action == 'used' else '报销单已取消，发票已释放。'
+            else:
+                return
+        except (ValueError, database.sqlite3.Error) as error:
+            self.feedback.set(f'保存失败：{error}')
+            return
+        self.pending_print = None
+        self.pending_action = None
+        self.confirm_button.pack_forget()
+        self.dismiss_button.pack_forget()
+        self.reload()
+        self.changed()
+        self.feedback.set(feedback)

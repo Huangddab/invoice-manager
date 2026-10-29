@@ -71,8 +71,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(str(app.edit_button['state']), 'disabled')
         app.reset_filters()
         app.select_all()
-        with patch('app.simpledialog.askstring', return_value='已核对'):
-            app.edit_remark()
+        app.edit_remark()
+        app.remark.set('已核对')
+        app.save_remark()
         self.assertEqual(database.list_invoices()[0]['remark'], '已核对')
         root.update()
 
@@ -140,18 +141,91 @@ class WorkflowTests(unittest.TestCase):
         app = InvoiceApp(root)
         app.query.set('no results')
         app.recommend()
-        self.assertEqual(len(app.table.selection()), 1)
+        self.assertIsNotNone(app.workflow.proposal)
         self.assertEqual(database.list_invoices()[0]['status'], 'available')
-        with patch('app.messagebox.askyesno', return_value=False):
-            app.create_batch()
         self.assertEqual(database.list_reimbursement_batches(), [])
         app.table.selection_remove(*app.table.selection())
-        with patch('app.messagebox.askyesno', return_value=True):
-            app.create_batch()
+        app.create_batch()
         self.assertEqual(len(database.list_reimbursement_batches()), 1)
         self.assertEqual(database.list_invoices()[0]['status'], 'reserved')
+        self.assertIsNotNone(app.workflow.batch_view)
         app.show_batches()
+        self.assertEqual(app.notebook.select(), str(app.history_tab))
+        app.history.tree.selection_set('1')
+        app.history.open_selected()
+        self.assertEqual(app.notebook.select(), str(app.month_tab))
         root.update()
+        self.assertFalse(any(isinstance(widget, tk.Toplevel) for widget in root.winfo_children()))
+        view = app.workflow.batch_view
+        self.assertTrue(view.finish_button.winfo_ismapped())
+        self.assertGreater(view.tree.winfo_height(), 100)
+        view.request_finish('used')
+        root.update()
+        self.assertTrue(view.confirm_button.winfo_ismapped())
+        self.assertLess(view.confirm_button.winfo_rooty() + view.confirm_button.winfo_height(), root.winfo_rooty() + root.winfo_height())
+        view.dismiss_pending()
+
+    def test_changed_target_invalidates_unconfirmed_proposal(self):
+        import tkinter as tk
+        import_invoices(self.pdfs)
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        app = InvoiceApp(root)
+        app.workflow.generate()
+        self.assertIsNotNone(app.workflow.proposal)
+        app.days.set('10')
+        self.assertIsNone(app.workflow.proposal)
+        app.workflow.confirm_proposal()
+        self.assertEqual(database.list_reimbursement_batches(), [])
+        self.assertEqual(database.list_invoices()[0]['status'], 'available')
+
+    def test_reserved_elsewhere_rejects_stale_proposal(self):
+        import tkinter as tk
+        import_invoices(self.pdfs)
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        app = InvoiceApp(root)
+        app.workflow.generate()
+        number = database.list_invoices()[0]['invoice_number']
+        database.create_reimbursement_batch('2026-10', 20, 2500, [number])
+        app.workflow.confirm_proposal()
+        self.assertIn('未创建', app.workflow.feedback.get())
+        self.assertEqual(len(database.list_reimbursement_batches()), 1)
+
+    def test_whole_reimbursement_flow_in_one_window(self):
+        import tkinter as tk
+        import_invoices(self.pdfs)
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        app = InvoiceApp(root)
+        app.days.set('20')
+        app.allowance.set('25')
+        app.workflow.generate()
+        app.workflow.confirm_proposal()
+        view = app.workflow.batch_view
+        destination = str(Path(self.temp.name) / 'export.zip')
+        with patch('batch_view.filedialog.asksaveasfilename', return_value=destination):
+            view.export()
+        self.assertTrue(Path(destination).is_file())
+        self.assertEqual(database.list_invoices()[0]['status'], 'reserved')
+        with patch('batch_view.print_command', return_value=['mock']), patch('batch_view.submit_print'):
+            view.print_checked()
+            deadline = time.monotonic() + 5
+            while view.busy and time.monotonic() < deadline:
+                root.update()
+                time.sleep(0.01)
+        self.assertFalse(view.busy)
+        self.assertEqual(database.list_invoices()[0]['is_printed'], 0)
+        view.confirm_pending()
+        self.assertEqual(database.list_invoices()[0]['is_printed'], 1)
+        self.assertEqual(database.list_invoices()[0]['status'], 'reserved')
+        view.request_finish('used')
+        self.assertEqual(database.list_invoices()[0]['status'], 'reserved')
+        view.confirm_pending()
+        self.assertEqual(database.list_invoices()[0]['status'], 'used')
+        self.assertIn('本单已完成报销', app.workflow.stage.get())
+        self.assertEqual(app.history.tree.item('1', 'values')[-1], '已报销')
+        self.assertFalse(any(isinstance(widget, tk.Toplevel) for widget in root.winfo_children()))
 
     def test_async_gui_import(self):
         import tkinter as tk

@@ -9,7 +9,7 @@ import tkinter as tk
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, ttk
 
 import database
 from read_invoice import import_invoices
@@ -82,7 +82,18 @@ class InvoiceApp:
         style.configure("Treeview", rowheight=32)
         style.configure("Title.TLabel", font=("", 20, "bold"))
         style.configure("Summary.TLabel", font=("", 12))
-        outer = ttk.Frame(root, padding=20)
+        self.notebook = ttk.Notebook(root)
+        self.notebook.pack(fill="both", expand=True)
+        self.month_tab = ttk.Frame(self.notebook)
+        self.stock_tab = ttk.Frame(self.notebook)
+        self.history_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.month_tab, text="本月报销")
+        self.notebook.add(self.stock_tab, text="发票库存")
+        self.notebook.add(self.history_tab, text="报销历史")
+        from workflow_panel import MonthlyWorkflow, HistoryPanel
+        self.workflow = MonthlyWorkflow(self.month_tab, self.month, self.days, self.allowance, self.workflow_changed)
+        self.history = HistoryPanel(self.history_tab, self.open_batch)
+        outer = ttk.Frame(self.stock_tab, padding=16)
         outer.pack(fill="both", expand=True)
         header = ttk.Frame(outer)
         header.pack(fill="x")
@@ -103,16 +114,7 @@ class InvoiceApp:
             ttk.Label(filters, text=label).pack(side="left")
             ttk.Combobox(filters, textvariable=variable, values=values, state="readonly", width=9).pack(side="left", padx=8)
         ttk.Button(filters, text="重置筛选", command=self.reset_filters).pack(side="right")
-        ttk.Label(outer, text="库存可搜索、筛选和修改备注；月度报销请直接点击「自动凑票并创建报销单」，无需手选。").pack(anchor="w", pady=(0, 8))
-        reimbursement = ttk.LabelFrame(outer, text="报销选票", padding=10)
-        reimbursement.pack(fill="x", pady=(0, 12))
-        for title, variable, width in (("月份", self.month, 9), ("报销天数", self.days, 5), ("每日标准（元）", self.allowance, 8)):
-            ttk.Label(reimbursement, text=title).pack(side="left", padx=(0, 4))
-            ttk.Entry(reimbursement, textvariable=variable, width=width).pack(side="left", padx=(0, 12))
-        ttk.Button(reimbursement, text="预览自动凑票", command=self.recommend).pack(side="left", padx=4)
-        ttk.Button(reimbursement, text="自动凑票并创建报销单", command=self.create_batch).pack(side="left", padx=4)
-        ttk.Button(reimbursement, text="报销记录", command=self.show_batches).pack(side="right")
-        ttk.Label(outer, textvariable=self.target_summary).pack(anchor="w", pady=(0, 8))
+        ttk.Label(outer, text="库存用于导入、查询与备注；请到「本月报销」生成方案，之后直接在同一页面打印、导出。").pack(anchor="w", pady=(0, 8))
         frame = ttk.Frame(outer)
         frame.pack(fill="both", expand=True)
         columns = ("number", "date", "seller", "amount", "printed", "status", "remark")
@@ -136,6 +138,11 @@ class InvoiceApp:
         actions.pack(fill="x", pady=8)
         self.edit_button = ttk.Button(actions, text="修改备注", command=self.edit_remark)
         self.edit_button.pack(side="left")
+        self.remark = tk.StringVar(root)
+        self.remark_entry = ttk.Entry(actions, textvariable=self.remark, width=25)
+        self.remark_entry.pack(side="left", padx=6)
+        self.save_remark_button = ttk.Button(actions, text="保存备注", command=self.save_remark)
+        self.save_remark_button.pack(side="left")
         self.open_button = ttk.Button(actions, text="打开原 PDF", command=self.open_pdf)
         self.open_button.pack(side="left", padx=6)
         self.batch_buttons = []
@@ -153,6 +160,7 @@ class InvoiceApp:
         ttk.Label(outer, textvariable=self.selection_summary).pack(anchor="w", pady=4)
         ttk.Separator(outer).pack(fill="x", pady=8)
         ttk.Label(outer, textvariable=self.feedback, wraplength=1050).pack(anchor="w")
+        self.import_errors = tk.Text(outer, height=3, wrap="word")
         self.table.bind("<<TreeviewSelect>>", self.selection_changed)
         self.table.bind("<Double-1>", self.edit_remark)
         root.bind("<Control-f>", lambda event: search.focus_set())
@@ -168,7 +176,7 @@ class InvoiceApp:
             self.rows = database.list_invoices()
             self.render()
         except sqlite3.Error as error:
-            messagebox.showerror("无法读取发票", str(error), parent=self.root)
+            self.feedback.set(f"无法读取发票：{error}")
 
     def render(self):
         selected = set(self.table.selection())
@@ -199,6 +207,10 @@ class InvoiceApp:
         self.selection_summary.set(f"已选 {len(selected)} 张 · 合计 ¥ {money(total)}")
         self.edit_button.configure(state="normal" if len(selected) == 1 else "disabled")
         self.open_button.configure(state="normal" if len(selected) == 1 else "disabled")
+        self.save_remark_button.configure(state="normal" if len(selected) == 1 else "disabled")
+        if len(selected) == 1:
+            row = next(row for row in self.rows if row["invoice_number"] in selected)
+            self.remark.set(row["remark"])
         try:
             _, days, allowance = reimbursement_inputs(self.month.get().strip(), self.days.get().strip(), self.allowance.get().strip())
             difference = total - days * allowance
@@ -214,16 +226,20 @@ class InvoiceApp:
         if len(selected) != 1:
             return
         row = next(row for row in self.rows if row["invoice_number"] == selected[0])
-        remark = simpledialog.askstring("修改备注", f"发票 {selected[0]}\n请输入备注（清空可删除备注）：", initialvalue=row["remark"], parent=self.root)
-        if remark is not None:
-            self.apply_change(lambda: database.update_remark(selected[0], remark.strip()), "备注已保存")
+        self.remark.set(row["remark"])
+        self.remark_entry.focus_set()
+
+    def save_remark(self):
+        selected = self.table.selection()
+        if len(selected) == 1:
+            self.apply_change(lambda: database.update_remark(selected[0], self.remark.get().strip()), "备注已保存")
 
     def apply_change(self, operation, success):
         try:
             if not operation():
                 raise ValueError("发票可能已被其他操作更改，请刷新后重试")
         except (sqlite3.Error, ValueError) as error:
-            messagebox.showerror("保存失败", str(error), parent=self.root)
+            self.feedback.set(f"保存失败：{error}")
             return
         self.refresh()
         self.feedback.set(success)
@@ -238,7 +254,8 @@ class InvoiceApp:
         numbers = self.table.selection()
         if not numbers:
             return
-        if value in ("used", "unusable") and not messagebox.askyesno("确认使用状态", f"将所选 {len(numbers)} 张发票设为「{STATUS[value]}」？", parent=self.root):
+        if value == "used":
+            self.feedback.set('请到「本月报销」或「报销历史」确认整单已报销，库存中不直接标记已使用。')
             return
         self.apply_change(lambda: database.update_status_batch(numbers, value), f"已将 {len(numbers)} 张发票设为{STATUS[value]}")
 
@@ -251,107 +268,35 @@ class InvoiceApp:
             row = next(row for row in self.rows if row["invoice_number"] == selected[0])
             path = original_path(row)
         except OSError as error:
-            messagebox.showwarning("找不到原 PDF", str(error), parent=self.root)
+            self.feedback.set(f"找不到原 PDF：{error}")
             return
         if not path or not Path(path).is_file():
-            messagebox.showwarning("找不到原 PDF", "原文件可能已移动或删除，请核对文件位置。", parent=self.root)
+            self.feedback.set("原文件可能已移动或删除，请核对文件位置。")
             return
         try:
             open_document(path)
         except OSError as error:
-            messagebox.showerror("无法打开 PDF", str(error), parent=self.root)
+            self.feedback.set(f"无法打开 PDF：{error}")
+
+    def workflow_changed(self):
+        self.refresh()
+        self.history.reload()
+
+    def open_batch(self, batch_id):
+        if self.workflow.open_batch(batch_id):
+            self.notebook.select(self.month_tab)
 
     def recommend(self):
-        try:
-            _, days, allowance = reimbursement_inputs(self.month.get().strip(), self.days.get().strip(), self.allowance.get().strip())
-            recommended = select_invoice_combination(database.list_invoices(), days * allowance)
-        except (ValueError, sqlite3.Error) as error:
-            messagebox.showwarning("无法推荐", str(error), parent=self.root)
-            return
-        if not recommended:
-            messagebox.showinfo("没有可用发票", "请先导入发票，或查看是否都已预留、使用。", parent=self.root)
-            return
-        self.reset_filters()
-        self.refresh()
-        self.table.selection_set([row["invoice_number"] for row in recommended])
-        self.table.see(recommended[0]["invoice_number"])
-        self.selection_changed()
-        self.feedback.set("这是自动凑票预览，尚未预留；点击「自动凑票并创建报销单」确认。库存勾选不影响自动凑票。")
+        self.notebook.select(self.month_tab)
+        self.workflow.generate()
 
     def create_batch(self):
-        try:
-            month, days, allowance = reimbursement_inputs(self.month.get().strip(), self.days.get().strip(), self.allowance.get().strip())
-            recommended = select_invoice_combination(database.list_invoices(), days * allowance)
-            if not recommended:
-                raise ValueError("没有待使用发票，请先导入发票；已预留、已使用和不可用发票不会参与凑票")
-            selected = [row["invoice_number"] for row in recommended]
-            current = {row["invoice_number"]: row for row in recommended}
-            total = sum(current[number]["total_amount_fen"] for number in selected)
-            details = "\n".join(f"{current[number]['seller']} · ¥ {money(current[number]['total_amount_fen'])}" for number in selected[:10])
-            if len(selected) > 10:
-                details += f"\n…另有 {len(selected) - 10} 张"
-            if not messagebox.askyesno("确认创建报销单", f"月份：{month}\n目标：¥ {money(days * allowance)}\n所选：{len(selected)} 张，¥ {money(total)}\n差额：¥ {money(total - days * allowance)}\n\n{details}\n\n确认后预留整张发票。可在报销记录中完成或取消。", parent=self.root):
-                return
-            batch_id = database.create_reimbursement_batch(month, days, allowance, selected)
-        except (ValueError, sqlite3.Error, OverflowError) as error:
-            messagebox.showerror("无法创建报销单", str(error), parent=self.root)
-            return
-        self.refresh()
-        self.feedback.set(f"已自动创建报销单 #{batch_id}，预留 {len(selected)} 张发票。勾选仅用于打印和导出。")
-        from batch_view import BatchView
-        BatchView(self.root, batch_id, self.refresh)
+        self.notebook.select(self.month_tab)
+        self.workflow.confirm_proposal()
 
     def show_batches(self):
-        window = tk.Toplevel(self.root)
-        window.title("报销记录")
-        window.geometry("850x420")
-        tree = ttk.Treeview(window, columns=("id", "month", "count", "target", "total", "status"), show="headings", selectmode="browse")
-        for key, label in zip(tree["columns"], ("编号", "月份", "张数", "目标金额", "选票金额", "状态")):
-            tree.heading(key, text=label)
-            tree.column(key, width=120, minwidth=65)
-        tree.pack(fill="both", expand=True, padx=12, pady=12)
-        names = {"reserved": "待报销", "used": "已报销", "cancelled": "已取消"}
-        def reload():
-            try:
-                batches = database.list_reimbursement_batches()
-            except sqlite3.Error as error:
-                messagebox.showerror("读取失败", str(error), parent=window)
-                return
-            tree.delete(*tree.get_children())
-            for batch in batches:
-                tree.insert("", "end", iid=str(batch["id"]), values=(batch["id"], batch["reimbursement_month"], batch["invoice_count"], money(batch["work_days"] * batch["daily_allowance_fen"]), money(batch["total_amount_fen"]), names[batch["status"]]))
-        def details(event=None):
-            selected = tree.selection()
-            if selected:
-                from batch_view import BatchView
-                try:
-                    BatchView(window, int(selected[0]), self.refresh)
-                except sqlite3.Error as error:
-                    messagebox.showerror("读取明细失败", str(error), parent=window)
-        tree.bind("<Double-1>", details)
-        def change(action):
-            selected = tree.selection()
-            if not selected:
-                messagebox.showinfo("请选择报销单", "先在列表中选择一张待报销的单据。", parent=window)
-                return
-            prompt = "完成报销会将整单发票标记为已使用。" if action == "used" else "取消后整单发票将恢复待使用。"
-            if not messagebox.askyesno("确认操作", prompt, parent=window):
-                return
-            try:
-                database.finish_reimbursement_batch(int(selected[0]), action)
-            except (ValueError, sqlite3.Error) as error:
-                messagebox.showerror("操作失败", str(error), parent=window)
-                return
-            reload()
-            self.refresh()
-            self.feedback.set(f"报销单 #{selected[0]} 已{'完成报销' if action == 'used' else '取消'}")
-        controls = ttk.Frame(window, padding=12)
-        controls.pack(fill="x")
-        ttk.Button(controls, text="查看明细 / 打印 / 导出", command=details).pack(side="left", padx=6)
-        ttk.Button(controls, text="完成报销", command=lambda: change("used")).pack(side="left", padx=6)
-        ttk.Button(controls, text="取消报销单", command=lambda: change("cancelled")).pack(side="left", padx=6)
-        ttk.Button(controls, text="刷新", command=reload).pack(side="right")
-        reload()
+        self.history.reload()
+        self.notebook.select(self.history_tab)
 
     def scan_folder(self):
         chosen = filedialog.askdirectory(parent=self.root, title="选择需要扫描新增 PDF 的文件夹")
@@ -396,16 +341,13 @@ class InvoiceApp:
         self.refresh()
         summary = f"导入完成：新增 {result['added']} 张，重复跳过 {result['duplicates']} 张，失败 {len(result['errors'])} 张。"
         self.feedback.set(summary)
+        self.import_errors.pack_forget()
         if result["errors"]:
-            window = tk.Toplevel(self.root)
-            window.title("导入结果 · 需要核对的文件")
-            window.geometry("650x350")
-            ttk.Label(window, text=summary, padding=12).pack(anchor="w")
-            text = tk.Text(window, wrap="word", padx=12, pady=12)
-            text.pack(fill="both", expand=True)
-            text.insert("1.0", "\n\n".join(f"{name}\n{error}" for name, error in result["errors"]))
-            text.configure(state="disabled")
-            ttk.Button(window, text="关闭", command=window.destroy).pack(pady=10)
+            self.import_errors.configure(state="normal")
+            self.import_errors.delete("1.0", "end")
+            self.import_errors.insert("1.0", "\n".join(f"{name}：{error}" for name, error in result["errors"]))
+            self.import_errors.configure(state="disabled")
+            self.import_errors.pack(fill="x", pady=6)
 
 
 def main():

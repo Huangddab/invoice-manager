@@ -124,17 +124,21 @@ class OutputTests(unittest.TestCase):
     def run_print(self, success_confirmation, submit_error=None):
         root, view = self.make_view()
         with patch('batch_view.print_command', return_value=['mock']), \
-             patch('batch_view.submit_print', side_effect=submit_error), \
-             patch('batch_view.messagebox.askokcancel', return_value=True), \
-             patch('batch_view.messagebox.askyesno', return_value=success_confirmation) as confirmation, \
-             patch('batch_view.messagebox.showerror'):
+             patch('batch_view.submit_print', side_effect=submit_error):
             view.print_checked()
             deadline = time.monotonic() + 5
             while view.busy and time.monotonic() < deadline:
                 root.update()
                 time.sleep(0.01)
             self.assertFalse(view.busy)
-            return confirmation.call_count
+            has_confirmation = view.pending_print is not None
+            # Submission alone must never mark a new invoice printed.
+            self.assertEqual(database.list_invoices()[0]['is_printed'], 0)
+            if success_confirmation:
+                view.confirm_pending()
+            else:
+                view.dismiss_pending()
+            return has_confirmation
 
     def test_print_requires_actual_success_confirmation(self):
         self.run_print(False)
@@ -144,16 +148,41 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(database.list_invoices()[0]['status'], 'reserved')
 
     def test_print_failure_never_requests_success_or_marks_printed(self):
-        calls = self.run_print(True, RuntimeError('cancelled or failed'))
-        self.assertEqual(calls, 0)
+        has_confirmation = self.run_print(True, RuntimeError('cancelled or failed'))
+        self.assertFalse(has_confirmation)
         self.assertEqual(database.list_invoices()[0]['is_printed'], 0)
 
     def test_cancel_print_leaves_state(self):
         _, view = self.make_view()
-        with patch('batch_view.print_command', return_value=['mock']), \
-             patch('batch_view.messagebox.askokcancel', return_value=False), \
+        with patch('batch_view.print_command', side_effect=FileNotFoundError('no printer')), \
              patch('batch_view.submit_print') as submit:
             view.print_checked()
             submit.assert_not_called()
         self.assertFalse(view.busy)
+        self.assertEqual(database.list_invoices()[0]['is_printed'], 0)
+
+    def test_inline_reimbursement_confirmation_and_cancel(self):
+        _, view = self.make_view()
+        view.request_finish('used')
+        self.assertEqual(database.list_invoices()[0]['status'], 'reserved')
+        view.dismiss_pending()
+        self.assertEqual(database.list_invoices()[0]['status'], 'reserved')
+        view.request_finish('used')
+        view.confirm_pending()
+        self.assertEqual(database.list_invoices()[0]['status'], 'used')
+        self.assertEqual(str(view.finish_button['state']), 'disabled')
+
+    def test_inline_release_reservation(self):
+        _, view = self.make_view()
+        view.request_finish('cancelled')
+        self.assertEqual(database.list_invoices()[0]['status'], 'reserved')
+        view.confirm_pending()
+        self.assertEqual(database.list_invoices()[0]['status'], 'available')
+
+    def test_no_checkboxes_selected_reports_inline(self):
+        _, view = self.make_view()
+        view.check_all(False)
+        view.export()
+        self.assertIn('请先勾选', view.feedback.get())
+        view.print_checked()
         self.assertEqual(database.list_invoices()[0]['is_printed'], 0)
