@@ -12,5 +12,5 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-echo Done: dist\InvoiceManager.exe
+echo Build verified. See the executable path printed above.
 pause

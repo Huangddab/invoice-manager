@@ -1,5 +1,7 @@
 """Build and verify a self-contained Windows executable without bundling user data."""
+from datetime import datetime
 import json
+import uuid
 from pathlib import Path
 import shutil
 import subprocess
@@ -62,6 +64,25 @@ def verify_executable(executable):
             raise RuntimeError('EXE self-check failed. Build was not accepted.')
 
 
+def publish_executable(executable, destination):
+    """Keep verified builds even when Windows has locked the previous EXE."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    pending = destination.with_name(f'.InvoiceManager-{uuid.uuid4().hex}.new.exe')
+    try:
+        shutil.copy2(executable, pending)
+        try:
+            pending.replace(destination)
+            return destination
+        except PermissionError:
+            alternative = destination.with_name(f'InvoiceManager-{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}.exe')
+            pending.replace(alternative)
+            print('The old EXE could not be replaced; it may still be running.')
+            print('Close the old application before starting this new EXE. Existing data is unchanged.')
+            return alternative
+    finally:
+        pending.unlink(missing_ok=True)
+
+
 def build():
     if sys.platform != 'win32':
         raise SystemExit('Windows EXE must be built on Windows. Use the Windows GitHub Actions workflow.')
@@ -87,14 +108,7 @@ def build():
         ], cwd=root, check=True)
     executable = staging / 'InvoiceManager.exe'
     verify_executable(executable)
-    destination = root / 'dist' / 'InvoiceManager.exe'
-    destination.parent.mkdir(exist_ok=True)
-    pending = destination.with_name('InvoiceManager.new.exe')
-    try:
-        shutil.copy2(executable, pending)
-        pending.replace(destination)
-    finally:
-        pending.unlink(missing_ok=True)
+    destination = publish_executable(executable, root / 'dist' / 'InvoiceManager.exe')
     print('Verified portable executable:', destination)
 
 

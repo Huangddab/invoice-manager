@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from tools.build_windows import build, materialize_library, tkinter_data_args, verify_executable
+from tools.build_windows import build, materialize_library, publish_executable, tkinter_data_args, verify_executable
 
 
 class WindowsBuildTests(unittest.TestCase):
@@ -87,3 +87,37 @@ class WindowsBuildTests(unittest.TestCase):
                 self.assertTrue((tk_exported / 'tk.tcl').is_file())
             finally:
                 interpreter.call('zipfs', 'unmount', mount)
+
+    def test_locked_old_exe_keeps_new_build_and_data(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'verified.exe'
+            source.write_bytes(b'new verified build')
+            destination = root / 'dist' / 'InvoiceManager.exe'
+            destination.parent.mkdir()
+            destination.write_bytes(b'old running build')
+            data = destination.parent / 'data'
+            data.mkdir()
+            (data / 'invoices.db').write_bytes(b'user database')
+            replace = Path.replace
+            def locked(path, target):
+                if target == destination:
+                    raise PermissionError('EXE in use')
+                return replace(path, target)
+            with patch.object(Path, 'replace', locked):
+                output = publish_executable(source, destination)
+            self.assertNotEqual(output, destination)
+            self.assertEqual(output.parent, destination.parent)
+            self.assertEqual(output.read_bytes(), b'new verified build')
+            self.assertEqual(destination.read_bytes(), b'old running build')
+            self.assertEqual((data / 'invoices.db').read_bytes(), b'user database')
+            self.assertEqual(list(destination.parent.glob('*.new.exe')), [])
+
+    def test_unlocked_exe_is_replaced_normally(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'verified.exe'
+            source.write_bytes(b'new verified build')
+            destination = root / 'dist' / 'InvoiceManager.exe'
+            self.assertEqual(publish_executable(source, destination), destination)
+            self.assertEqual(destination.read_bytes(), b'new verified build')

@@ -6,7 +6,7 @@
 
 在仓库的 **Actions → Build Windows EXE** 中打开最新成功的构建，下载底部 **InvoiceManager-Windows-x64**，解压后双击 `InvoiceManager.exe`。适用于 Windows 10/11 64 位，无需 Python、pip 或 SumatraPDF。首次启动单文件程序需要解压运行库，请稍候。
 
-程序会在 EXE 旁创建 `data/`，保存数据库和发票原件。请放在可写的普通文件夹中。更新时关闭程序，只替换 EXE，保留 `data/`。
+程序会在 EXE 旁创建 `data/`，保存数据库和发票原件。请放在可写的普通文件夹中。更新时关闭程序，只替换 EXE，保留 `data/`。如果旧 EXE 被占用无法替换，构建脚本会将新版本保存为 `dist/InvoiceManager-日期时间-编号.exe`，最后打印实际位置；关闭旧程序后可运行这个新文件，它使用同一目录下的 `data/`。
 
 从源码版迁移旧数据：关闭程序，将原来的 `invoices.db` 和 `managed_pdfs/` 一起**复制**到 EXE 旁的 `data/` 中；旧票据若仍保存在 `invoices/`，也复制到 `data/invoices/`。复制前请备份，勿覆盖另一份正在使用的数据库。新程序不会自动打包或上传你的发票数据。
 
