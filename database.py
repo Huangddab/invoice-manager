@@ -413,3 +413,22 @@ def update_category_batch(invoice_numbers, category):
                 raise ValueError('只能调整未预留、未使用发票的分类')
             conn.execute('UPDATE invoices SET category = ? WHERE invoice_number = ?', (category, number))
     return True
+
+
+def delete_invoices(invoice_numbers):
+    """Delete inventory records atomically without deleting PDFs or batch history."""
+    numbers = list(dict.fromkeys(invoice_numbers))
+    if not numbers:
+        raise ValueError('请先选择发票')
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute('PRAGMA foreign_keys = ON')
+        conn.execute('BEGIN IMMEDIATE')
+        for number in numbers:
+            row = conn.execute('SELECT status FROM invoices WHERE invoice_number = ?', (number,)).fetchone()
+            if not row:
+                raise ValueError('部分发票已不存在，请刷新后重试')
+            linked = conn.execute('SELECT 1 FROM reimbursement_items WHERE invoice_number = ?', (number,)).fetchone()
+            if row[0] in ('reserved', 'used') or linked:
+                raise ValueError('不能删除已预留、已使用或关联报销单的发票；未报销的请先取消报销单')
+            conn.execute('DELETE FROM invoices WHERE invoice_number = ?', (number,))
+    return len(numbers)

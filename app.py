@@ -9,7 +9,7 @@ import tkinter as tk
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import database
 from invoice_files import display_invoice_number
@@ -158,13 +158,8 @@ class InvoiceApp:
             ttk.Button(category_actions, text=f"移至{label}", command=lambda value=code: self.move_category(value)).pack(side="left", padx=4)
         actions = ttk.Frame(outer)
         actions.pack(fill="x", pady=8)
-        self.edit_button = ttk.Button(actions, text="修改备注", command=self.edit_remark)
-        self.edit_button.pack(side="left")
-        self.remark = tk.StringVar(root)
-        self.remark_entry = ttk.Entry(actions, textvariable=self.remark, width=25)
-        self.remark_entry.pack(side="left", padx=6)
-        self.save_remark_button = ttk.Button(actions, text="保存备注", command=self.save_remark)
-        self.save_remark_button.pack(side="left")
+        self.delete_button = ttk.Button(actions, text="删除记录", command=self.delete_selected)
+        self.delete_button.pack(side="left", padx=6)
         self.open_button = ttk.Button(actions, text="打开原 PDF", command=self.open_pdf)
         self.open_button.pack(side="left", padx=6)
         self.batch_buttons = []
@@ -228,12 +223,8 @@ class InvoiceApp:
         selected = set(self.table.selection())
         total = sum(row["total_amount_fen"] for row in self.visible if row["invoice_number"] in selected)
         self.selection_summary.set(f"已选 {len(selected)} 张 · 合计 ¥ {money(total)}")
-        self.edit_button.configure(state="normal" if len(selected) == 1 else "disabled")
+        self.delete_button.configure(state="normal" if selected else "disabled")
         self.open_button.configure(state="normal" if len(selected) == 1 else "disabled")
-        self.save_remark_button.configure(state="normal" if len(selected) == 1 else "disabled")
-        if len(selected) == 1:
-            row = next(row for row in self.rows if row["invoice_number"] in selected)
-            self.remark.set(row["remark"])
         try:
             _, days, allowance = reimbursement_inputs(self.month.get().strip(), self.days.get().strip(), self.allowance.get().strip())
             difference = total - days * allowance
@@ -245,17 +236,35 @@ class InvoiceApp:
             button.configure(state="normal" if selected else "disabled")
 
     def edit_remark(self, event=None):
+        if event is not None:
+            number = self.table.identify_row(event.y)
+            if not number:
+                return
+            self.table.selection_set(number)
         selected = self.table.selection()
         if len(selected) != 1:
             return
         row = next(row for row in self.rows if row["invoice_number"] == selected[0])
-        self.remark.set(row["remark"])
-        self.remark_entry.focus_set()
+        remark = simpledialog.askstring("修改备注", f"发票 {display_invoice_number(row)}", initialvalue=row["remark"], parent=self.root)
+        if remark is not None:
+            self.apply_change(lambda: database.update_remark(selected[0], remark.strip()), "备注已保存")
+        return "break"
 
-    def save_remark(self):
+    def delete_selected(self):
         selected = self.table.selection()
-        if len(selected) == 1:
-            self.apply_change(lambda: database.update_remark(selected[0], self.remark.get().strip()), "备注已保存")
+        if not selected:
+            self.feedback.set('请先选择要删除的发票。')
+            return
+        if not messagebox.askyesno('删除发票记录', f'确认删除所选 {len(selected)} 张发票的数据库记录？\n原始 PDF 保留。已预留、已使用或关联报销单的发票不能删除。', parent=self.root):
+            return
+        try:
+            count = database.delete_invoices(selected)
+        except (ValueError, sqlite3.Error) as error:
+            self.feedback.set(f'删除失败：{error}')
+            return
+        self.workflow.inputs_changed()
+        self.workflow_changed()
+        self.feedback.set(f'已删除 {count} 条记录，原始 PDF 保留。')
 
     def apply_change(self, operation, success):
         try:
