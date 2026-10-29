@@ -227,6 +227,30 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(app.history.tree.item('1', 'values')[-1], '已报销')
         self.assertFalse(any(isinstance(widget, tk.Toplevel) for widget in root.winfo_children()))
 
+    def test_cancel_removes_record_and_clears_current_page(self):
+        import tkinter as tk
+        import_invoices(self.pdfs)
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        app = InvoiceApp(root)
+        app.workflow.generate()
+        app.workflow.confirm_proposal()
+        view = app.workflow.batch_view
+        database.update_printed_batch([view.rows[0]['invoice_number']], True)
+        view.request_finish('cancelled')
+        view.confirm_pending()
+        root.update()
+        self.assertIsNone(app.workflow.batch_view)
+        self.assertEqual(app.workflow.preview.get_children(), ())
+        self.assertEqual(app.history.tree.get_children(), ())
+        self.assertEqual(database.list_reimbursement_batches(), [])
+        self.assertEqual(database.reimbursement_invoices(view.batch_id), [])
+        row = database.list_invoices()[0]
+        self.assertEqual(row['status'], 'available')
+        self.assertEqual(row['is_printed'], 1)
+        app.workflow.generate()
+        self.assertIsNotNone(app.workflow.proposal)
+
     def test_async_gui_import(self):
         import tkinter as tk
         root = tk.Tk()

@@ -241,10 +241,11 @@ class BatchView:
             self.feedback.set('确认已报销？整单发票将标记已使用，不可重复报销。')
             self.show_confirmation('确认整单已报销')
         else:
-            self.feedback.set('取消本单并释放预留发票？')
-            self.show_confirmation('确认取消并释放预留')
+            self.feedback.set('删除本单记录并释放预留发票？')
+            self.show_confirmation('确认取消并清空记录')
 
     def confirm_pending(self):
+        cancelled = self.pending_print is None and self.pending_action == 'cancelled'
         try:
             if self.pending_print is not None:
                 database.update_printed_batch(self.pending_print, True)
@@ -261,6 +262,17 @@ class BatchView:
         self.pending_action = None
         self.confirm_button.pack_forget()
         self.dismiss_button.pack_forget()
+        if cancelled:
+            self.batch_status = 'cancelled'
+            self.rows = []
+            self.checked.clear()
+            self.header.set('')
+            self.render()
+            self.finish_button.configure(state='disabled')
+            self.cancel_button.configure(state='disabled')
+            self.feedback.set('已取消，记录已清空。')
+            self.changed()
+            return
         self.reload()
         self.changed()
         self.feedback.set(feedback)

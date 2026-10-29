@@ -343,7 +343,11 @@ def finish_reimbursement_batch(batch_id, action):
                                   ('used' if action == 'used' else 'available', number))
             if cursor.rowcount != 1:
                 raise ValueError('发票状态与报销单不一致，未保存任何修改')
-        conn.execute('UPDATE reimbursement_batches SET status = ? WHERE id = ?', (action, batch_id))
+        if action == 'cancelled':
+            conn.execute('DELETE FROM reimbursement_items WHERE batch_id = ?', (batch_id,))
+            conn.execute('DELETE FROM reimbursement_batches WHERE id = ?', (batch_id,))
+        else:
+            conn.execute('UPDATE reimbursement_batches SET status = ? WHERE id = ?', (action, batch_id))
     return True
 
 

@@ -213,6 +213,8 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(database.list_invoices()[0]['status'], 'reserved')
         view.confirm_pending()
         self.assertEqual(database.list_invoices()[0]['status'], 'available')
+        self.assertEqual(database.list_reimbursement_batches(), [])
+        self.assertEqual(database.reimbursement_invoices(self.batch), [])
 
     def test_open_original_works_immediately_without_clicking_row(self):
         _, view = self.make_view()

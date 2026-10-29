@@ -121,7 +121,13 @@ class MonthlyWorkflow:
         if state == 'used':
             self.stage.set('本单已完成报销')
         elif state == 'cancelled':
-            self.stage.set('本单已取消')
+            self.batch_view.window.destroy()
+            self.batch_view = None
+            self.preview.delete(*self.preview.get_children())
+            self.preview.pack(fill='both', expand=True, padx=12, pady=12)
+            self.stage.set('本月报销')
+            self.inputs_changed()
+            self.feedback.set('已取消，记录已清空。')
 
 
 class HistoryPanel:
