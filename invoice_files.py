@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from runtime_paths import resource_path
 
 
 def original_path(invoice):
@@ -109,7 +110,7 @@ def print_command(pdf, sumatra=None):
         if sumatra:
             return [sumatra, '-print-dialog', '-exit-when-done', '-print-settings', 'paper=A5,landscape,monochrome,fit', str(pdf)]
         directory = str((Path(pdf).parent / 'native-print-pages').resolve()).replace("'", "''")
-        script = "$ImageDirectory = '" + directory + "'\n" + Path(__file__).with_name('windows_print.ps1').read_text(encoding='utf-8')
+        script = "$ImageDirectory = '" + directory + "'\n" + resource_path('windows_print.ps1').read_text(encoding='utf-8')
         encoded = base64.b64encode(script.encode('utf-16-le')).decode('ascii')
         return ['powershell.exe', '-NoProfile', '-STA', '-EncodedCommand', encoded]
     executable = shutil.which('lp')

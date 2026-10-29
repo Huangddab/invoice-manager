@@ -177,7 +177,7 @@ def import_invoices(paths, category="meal"):
 def scan_invoice_folder():
     init_db()
 
-    invoice_dir = Path(__file__).resolve().parent / "invoices"
+    invoice_dir = database.DB_PATH.parent / "invoices"
     invoice_dir.mkdir(parents=True, exist_ok=True)
 
     pdf_files = sorted(

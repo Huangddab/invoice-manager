@@ -8,3 +8,10 @@ managed_pdfs/
 # Generated output
 exports/
 .pytest_cache/
+
+# Packaged application and portable user data
+build/
+dist/
+*.spec
+data/
+frozen-check.json

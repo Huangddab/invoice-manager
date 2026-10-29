@@ -4,6 +4,7 @@ from tkinter import ttk
 import tkinter as tk
 
 import database
+from ui_widgets import checkbox_icons
 from invoice_files import display_invoice_number
 from batch_view import BatchView
 from invoice_selector import select_invoice_combination
@@ -34,12 +35,22 @@ class MonthlyWorkflow:
         self.other_button = ttk.Button(self.other_bar, text='选择其他发票（0 张）', command=self.toggle_other_panel)
         self.other_button.pack(side='left')
         self.other_frame = ttk.Frame(parent, padding=(12, 4))
-        self.other_tree = ttk.Treeview(self.other_frame, columns=('check', 'number', 'seller', 'amount'), show='headings', height=3, selectmode='browse')
-        for key, title, width in [('check', '勾选', 55), ('number', '发票号', 210), ('seller', '销售方', 420), ('amount', '金额', 130)]:
+        toolbar = ttk.Frame(self.other_frame)
+        toolbar.pack(fill='x', pady=(0, 4))
+        self.other_select_all = ttk.Button(toolbar, text='全选', command=lambda: self.check_all_other(True))
+        self.other_select_all.pack(side='left')
+        ttk.Button(toolbar, text='取消全选', command=lambda: self.check_all_other(False)).pack(side='left', padx=6)
+        table = ttk.Frame(self.other_frame)
+        table.pack(fill='both', expand=True)
+        self.other_icons = checkbox_icons(table)
+        self.other_tree = ttk.Treeview(table, columns=('number', 'seller', 'amount'), show='tree headings', height=3, selectmode='browse')
+        self.other_tree.heading('#0', text='勾选')
+        self.other_tree.column('#0', width=60, minwidth=60, stretch=False)
+        for key, title, width in [ ('number', '发票号', 210), ('seller', '销售方', 420), ('amount', '金额', 130)]:
             self.other_tree.heading(key, text=title)
             self.other_tree.column(key, width=width)
         self.other_tree.pack(side='left', fill='both', expand=True)
-        scrollbar = ttk.Scrollbar(self.other_frame, orient='vertical', command=self.other_tree.yview)
+        scrollbar = ttk.Scrollbar(table, orient='vertical', command=self.other_tree.yview)
         scrollbar.pack(side='right', fill='y')
         self.other_tree.configure(yscrollcommand=scrollbar.set)
         self.other_tree.bind('<Button-1>', self.toggle_other)
@@ -70,7 +81,7 @@ class MonthlyWorkflow:
         self.other_checked.intersection_update(row['invoice_number'] for row in self.other_rows)
         self.other_tree.delete(*self.other_tree.get_children())
         for row in self.other_rows:
-            self.other_tree.insert('', 'end', iid=row['invoice_number'], values=('☑' if row['invoice_number'] in self.other_checked else '☐', display_invoice_number(row), row['seller'], money(row['total_amount_fen'])))
+            self.other_tree.insert('', 'end', iid=row['invoice_number'], image=self.other_icons[int(row['invoice_number'] in self.other_checked)], values=(display_invoice_number(row), row['seller'], money(row['total_amount_fen'])))
         self.other_button.configure(text=f'选择其他发票（{len(self.other_checked)} 张）')
         if previous != self.other_checked:
             self.inputs_changed()
@@ -83,6 +94,12 @@ class MonthlyWorkflow:
             self.other_frame.pack(fill='x', before=self.total_label)
             if not self.other_rows:
                 self.feedback.set('暂无待使用的其他发票，可在库存中导入或调整分类。')
+
+    def check_all_other(self, checked):
+        self.refresh_other()
+        self.other_checked = {row['invoice_number'] for row in self.other_rows} if checked else set()
+        self.refresh_other()
+        self.inputs_changed()
 
     def toggle_other_number(self, number):
         if not any(row['invoice_number'] == number for row in self.other_rows):
@@ -98,7 +115,7 @@ class MonthlyWorkflow:
 
     def toggle_other(self, event):
         number = self.other_tree.identify_row(event.y)
-        if number and self.other_tree.identify_column(event.x) == '#1':
+        if number and self.other_tree.identify_column(event.x) == '#0':
             self.toggle_other_number(number)
             return 'break'
 

@@ -9,6 +9,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import database
+from ui_widgets import checkbox_icons
 from invoice_files import display_invoice_number, batch_export_name, export_zip, original_path, prepare_print_pdf, print_command, submit_print
 
 
@@ -39,10 +40,13 @@ class BatchView:
         self.print_button = ttk.Button(controls, text='打印（A5 横向黑白）', command=self.print_checked)
         self.print_button.pack(side='right')
         frame = ttk.Frame(self.window, padding=12)
-        columns = ('check', 'category', 'number', 'date', 'buyer', 'seller', 'amount', 'printed', 'remark')
-        self.tree = ttk.Treeview(frame, columns=columns, show='headings', selectmode='browse')
-        for key, title, width in zip(columns, ('勾选', '分类', '发票号码', '开票日期', '购买方', '销售方', '真实金额', '打印状态', '备注'),
-                                    (55, 60, 180, 100, 160, 200, 95, 85, 160)):
+        columns = ('category', 'number', 'date', 'buyer', 'seller', 'amount', 'printed', 'remark')
+        self.tree = ttk.Treeview(frame, columns=columns, show='tree headings', selectmode='browse')
+        self.check_icons = checkbox_icons(frame)
+        self.tree.heading('#0', text='勾选')
+        self.tree.column('#0', width=60, minwidth=60, stretch=False)
+        for key, title, width in zip(columns, ('分类', '发票号码', '开票日期', '购买方', '销售方', '真实金额', '打印状态', '备注'),
+                                    (60, 180, 100, 160, 200, 95, 85, 160)):
             self.tree.heading(key, text=title)
             self.tree.column(key, width=width, minwidth=50)
         scroll = ttk.Scrollbar(frame, orient='vertical', command=self.tree.yview)
@@ -90,8 +94,8 @@ class BatchView:
         selected = self.tree.selection()
         self.tree.delete(*self.tree.get_children())
         for row in self.rows:
-            self.tree.insert('', 'end', iid=row['invoice_number'], values=(
-                '☑' if row['invoice_number'] in self.checked else '☐', '餐补' if row['category'] == 'meal' else '其他', display_invoice_number(row), row['invoice_date'],
+            self.tree.insert('', 'end', iid=row['invoice_number'], image=self.check_icons[int(row['invoice_number'] in self.checked)], values=(
+                '餐补' if row['category'] == 'meal' else '其他', display_invoice_number(row), row['invoice_date'],
                 row['buyer'], row['seller'], amount(row['total_amount_fen']), '已打印' if row['is_printed'] else '未打印', row['remark']))
         if self.rows:
             number = selected[0] if selected and self.tree.exists(selected[0]) else self.rows[0]['invoice_number']
@@ -118,7 +122,7 @@ class BatchView:
 
     def toggle(self, event):
         number = self.tree.identify_row(event.y)
-        if number and self.tree.identify_column(event.x) == '#1':
+        if number and self.tree.identify_column(event.x) == '#0':
             self.toggle_number(number)
             return 'break'
 
@@ -165,7 +169,7 @@ class BatchView:
 
     def open_row(self, event):
         number = self.tree.identify_row(event.y)
-        if number and self.tree.identify_column(event.x) != '#1':
+        if number and self.tree.identify_column(event.x) != '#0':
             self.tree.selection_set(number)
             self.open_pdf()
 
