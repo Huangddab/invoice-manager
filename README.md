@@ -2,6 +2,8 @@
 
 平时积累 PDF 发票，分「餐补」「其他」两类管理。餐补按「可报销天数 × 每日标准」自动凑票，其他发票直接勾选，两部分合并为一张月度报销单，统一打印、导出和确认报销。每日标准默认 **25 元**。
 
+开发维护请阅读 [开发文档](docs/DEVELOPMENT.md)：包含架构、数据库、业务规则、测试、打包与故障排查。
+
 ## Windows 直接运行（无需安装 Python）
 
 在仓库的 **Actions → Build Windows EXE** 中打开最新成功的构建，下载底部 **InvoiceManager-Windows-x64**，解压后双击 `InvoiceManager.exe`。适用于 Windows 10/11 64 位，无需 Python、pip 或 SumatraPDF。首次启动单文件程序需要解压运行库，请稍候。
