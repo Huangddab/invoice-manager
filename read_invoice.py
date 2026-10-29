@@ -52,7 +52,15 @@ def extract_invoice_date(text):
 def extract_company_names(text):
     pattern = r"购\s*名称[：:]\s*(.*?)\s+销\s*名称[：:]\s*([^\n]+)"
     match = re.search(pattern,text)
-    
+     # 兼容销售方名称被提取到“销 名称”标签前面的情况
+    if match is None:
+        fallback_pattern = (
+            r"购[ \t]*名称[：:][ \t]*([^\n]+?)"
+            r"[ \t]{2,}([^\n]+?)"
+            r"销[ \t]*名称[：:][ \t]*(?=\n|$)"
+        )
+        match = re.search(fallback_pattern, text)
+        
     if match is None:
         return None,None
         
@@ -61,6 +69,7 @@ def extract_company_names(text):
     
     return buyer,seller
 
+# 解析整张发票，返回字典形式的结果
 def parse_invoice(pdf_path):
     text = read_invoice_text(pdf_path)
     buyer,seller = extract_company_names(text)
@@ -72,79 +81,59 @@ def parse_invoice(pdf_path):
         "seller": seller,
         "file_path": str(pdf_path.resolve()),
     }
-    
-init_db() 
-invoice_dir = Path(__file__).resolve().parent / "invoices"
-pdf_file = list(invoice_dir.glob("*.pdf"))
 
-if not pdf_file:
-    print("invoices 文件夹中没有PDF文件")
-# else:
-#     pdf_path = pdf_file[0]
-#     print("正在读取:",pdf_path.name)
-    
-#     text =  read_invoice_text(pdf_path)
-#     print(text)
+# 扫描发票文件夹，解析并保存发票信息
+def scan_invoice_folder():
+    init_db()
 
-#     invoice_num = extract_invoice_number(text)
-#     if invoice_num  is None:
-#         print("未识别到发票号码，请人工核对")
-#     else:
-#         print("识别到的发票号码:",invoice_num)
+    invoice_dir = Path(__file__).resolve().parent / "invoices"
+    invoice_dir.mkdir(parents=True, exist_ok=True)
 
-#     total_amount = extract_total_amount(text)
-#     if total_amount is None:
-#         print("未识别到价税合计，请人工核对")
-#     else:
-#         print(f"价税合计：{total_amount:.2f} 元")
+    pdf_files = sorted(
+        path
+        for path in invoice_dir.iterdir()
+        if path.is_file() and path.suffix.lower() == ".pdf"
+    )
 
-#     invoice_date = extract_invoice_date(text)
-#     print("开票日期:",invoice_date)
+    result = {
+        "added": 0,
+        "duplicate": 0,
+        "errors": [],
+    }
 
-#     buyer,seller = extract_company_names(text)
-#     print("购买方:",buyer)
-#     print("销售方:",seller)
-
-
-# else:
-#     pdf_path = pdf_file[0]
-#     invoice = parse_invoice(pdf_path)
-
-#     for field, value in invoice.items():
-#         print(f"{field}: {value}")
-
-
-else:
-    invoices = []
-    seen_numbers = set()
-    
-    for pdf_path in pdf_file:
-        invoice = parse_invoice(pdf_path)
-        invoice_number = invoice["invoice_number"]
-        
-        if invoice_number is None:
-            print(f"需要人工核对，未识别到发票号：{pdf_path.name}")
+    for pdf_path in pdf_files:
+        try:
+            invoice = parse_invoice(pdf_path)
+        except Exception as error:
+            result["errors"].append(
+                f"{pdf_path.name}：读取或解析失败，{error}"
+            )
             continue
-        
-        if invoice_number in seen_numbers:
-            print(f"跳过重复发票：{pdf_path.name}")
-            continue
+
         try:
             saved = save_invoice(invoice)
         except ValueError as error:
-            print(f"需要人工核对：{pdf_path.name}，原因：{error}")
+            result["errors"].append(
+                f"{pdf_path.name}：{error}"
+            )
             continue
 
-        if not saved:
-            print(f"数据库中已存在：{invoice_number}")
-            continue
-        
-        seen_numbers.add(invoice_number)
-        invoices.append(invoice)
-        print(
-            f"{invoice['invoice_number']} | "
-            f"{invoice['seller']} | "
-            f"{invoice['total_amount']} 元"
-        )
+        if saved:
+            result["added"] += 1
+        else:
+            result["duplicate"] += 1
 
-    print(f"本次新增 {len(invoices)} 张发票")
+    return result
+
+
+if __name__ == "__main__":
+    result = scan_invoice_folder()
+
+    print(
+        f"新增 {result['added']} 张，"
+        f"重复 {result['duplicate']} 张，"
+        f"失败 {len(result['errors'])} 份文件"
+    )
+
+    for error in result["errors"]:
+        print(error)

@@ -153,6 +153,21 @@ def update_printed_batch(invoice_numbers, is_printed):
     finally:
         conn.close()
 
+# 获取发票对应的文件路径
+def get_invoice_file_path(invoice_number):
+    conn = sqlite3.connect(DB_PATH)
+    
+    try:
+        row = conn.execute("""
+            SELECT file_path
+            FROM invoices
+            WHERE invoice_number = ?
+        """, (invoice_number,)).fetchone()
+        
+        return row[0] if row else None
+    finally:
+        conn.close()
+
 if __name__ == "__main__":
     init_db()
     print("数据库初始化完成:",DB_PATH)
