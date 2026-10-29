@@ -9,10 +9,10 @@ import tkinter as tk
 import unittest
 from unittest.mock import patch
 
-import database
-from app import InvoiceApp, filter_invoices
-from invoice_selector import select_invoice_combination
-from read_invoice import import_invoices, parse_invoice
+from invoice_manager import database
+from invoice_manager.app import InvoiceApp, filter_invoices
+from invoice_manager.invoice_selector import select_invoice_combination
+from invoice_manager.read_invoice import import_invoices, parse_invoice
 
 
 class CategoryTests(unittest.TestCase):
@@ -107,11 +107,11 @@ class CategoryTests(unittest.TestCase):
         batch = database.list_reimbursement_batches()[0]
         self.assertEqual((batch['other_amount_fen'], batch['total_amount_fen']), (8000, 12900))
         self.assertEqual(app.history.tree.item(str(batch['id']), 'values')[3], '130.00')
-        with patch('batch_view.filedialog.asksaveasfilename', return_value='') as dialog:
+        with patch('invoice_manager.batch_view.filedialog.asksaveasfilename', return_value='') as dialog:
             view.export()
         self.assertEqual(dialog.call_args.kwargs['initialfile'], '2026-10应报销：130实际报销：129差额-1.zip')
         destination = str(Path(self.temp.name) / 'combined.zip')
-        with patch('batch_view.filedialog.asksaveasfilename', return_value=destination):
+        with patch('invoice_manager.batch_view.filedialog.asksaveasfilename', return_value=destination):
             view.export()
         with zipfile.ZipFile(destination) as archive:
             self.assertEqual(len(archive.namelist()), 2)
@@ -129,7 +129,7 @@ class CategoryTests(unittest.TestCase):
         app.workflow.generate()
         self.assertIsNotNone(app.workflow.proposal)
         app.workflow.confirm_proposal()
-        with patch('batch_view.messagebox.askyesno', return_value=True):
+        with patch('invoice_manager.batch_view.messagebox.askyesno', return_value=True):
             app.workflow.batch_view.request_finish('cancelled')
         self.assertEqual(database.list_reimbursement_batches(), [])
         self.assertEqual(database.list_invoices()[0]['status'], 'available')
@@ -160,7 +160,7 @@ class CategoryTests(unittest.TestCase):
 
     def test_ui_import_uses_selected_category(self):
         root, app = self.app()
-        with patch('app.filedialog.askopenfilenames', return_value=[str(self.pdf)]) as dialog:
+        with patch('invoice_manager.app.filedialog.askopenfilenames', return_value=[str(self.pdf)]) as dialog:
             app.other_import_button.invoke()
         self.assertIn('导入其他', dialog.call_args.kwargs['title'])
         deadline = time.monotonic() + 5
@@ -174,11 +174,11 @@ class CategoryTests(unittest.TestCase):
 
     def test_meal_import_button_and_cancel_picker(self):
         root, app = self.app()
-        with patch('app.filedialog.askopenfilenames', return_value=[]):
+        with patch('invoice_manager.app.filedialog.askopenfilenames', return_value=[]):
             app.import_button.invoke()
         self.assertFalse(app.importing)
         self.assertEqual(database.list_invoices(), [])
-        with patch('app.filedialog.askopenfilenames', return_value=[str(self.pdf)]) as dialog:
+        with patch('invoice_manager.app.filedialog.askopenfilenames', return_value=[str(self.pdf)]) as dialog:
             app.import_button.invoke()
         self.assertIn('导入餐补', dialog.call_args.kwargs['title'])
         self.assertTrue(all(str(control['state']) == 'disabled' for control in app.import_controls))
@@ -196,7 +196,7 @@ class CategoryTests(unittest.TestCase):
         folder = Path(self.temp.name) / 'scan'
         folder.mkdir()
         (folder / 'invoice.PDF').write_bytes(self.pdf.read_bytes())
-        with patch('app.filedialog.askdirectory', return_value=str(folder)) as dialog:
+        with patch('invoice_manager.app.filedialog.askdirectory', return_value=str(folder)) as dialog:
             app.scan_folder('other')
         self.assertIn('导入其他', dialog.call_args.kwargs['title'])
         deadline = time.monotonic() + 5

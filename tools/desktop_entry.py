@@ -13,9 +13,9 @@ def self_check(destination):
     import tkinter as tk
     import fitz
     import pypdf
-    import database
-    from invoice_files import prepare_print_pdf
-    from runtime_paths import data_directory, resource_path
+    from invoice_manager import database
+    from invoice_manager.invoice_files import prepare_print_pdf
+    from invoice_manager.runtime_paths import data_directory, resource_path
     assert resource_path('windows_print.ps1').is_file()
     assert pypdf.__version__
     with tempfile.TemporaryDirectory() as directory:
@@ -42,5 +42,5 @@ if __name__ == '__main__':
     if len(sys.argv) == 3 and sys.argv[1] == '--self-check':
         self_check(sys.argv[2])
     else:
-        from app import main
+        from invoice_manager.app import main
         main()

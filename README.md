@@ -22,7 +22,7 @@ GitHub Actions 会在相关代码推送后自动构建，也可以手动运行�
 
 ## 开发运行
 
-源码入口只有 `app.py`，旧的 `main.py` 及命令行录入脚本已移除。`database.py`、`read_invoice.py` 等是应用必需模块，不能删除。`tools/windows_print.ps1` 是系统打印组件，打包时会内置到 EXE 中，无需手动运行。
+源码入口只有 `app.py`，旧的 `main.py` 及命令行录入脚本已移除。应用模块已集中到 `invoice_manager/`，该目录是程序本体，不能删除。`tools/windows_print.ps1` 是系统打印组件，打包时会内置到 EXE 中，无需手动运行。
 
 ```powershell
 py -m pip install -r requirements.txt
@@ -118,8 +118,35 @@ python -m unittest discover -s tests -v
 | `invoices/` | 原先的发票存放目录，勿当缓存删除 |
 | `.venv*` | 本机 Python 虚拟环境；当前正在使用的环境需保留 |
 | `.build-venv/` | 打包专用环境，可删除后重建 |
+| `invoice_manager/` | 应用代码（界面、数据库、解析、导出等） |
 | `tools/` | 打包入口、构建及 Windows 打印组件 |
 | `tests/` | 自动测试 |
 | `.github/` | GitHub 自动构建配置 |
 
+旧虚拟环境已停止 Git 跟踪；后续新建环境、缓存和打包输出均被忽略，不再提交到仓库。历史 `invoices.db` 和 `invoices/` 保留原有跟踪，避免这次目录清理删除原有数据；它们不打入 EXE。
+
 旧的文件夹版 `dist/InvoiceManager/` 可能仍留在本机；新构建不会使用它，也不会自动删除其中可能存在的数据。请先检查、备份，再自行移除旧版。不要将旧文件夹里的 EXE 单独取出运行。
+
+## 项目结构
+
+```text
+app.py                  # 源码启动入口：py app.py
+build_windows.bat       # Windows 一键打包
+invoice_manager/        # 应用模块
+  app.py                # 主窗口及库存操作
+  workflow_panel.py     # 月度报销、历史
+  batch_view.py         # 报销明细与打印导出
+  database.py           # 数据库操作
+  read_invoice.py       # PDF 解析与导入
+  invoice_files.py       # 文件保管、导出及打印副本
+  invoice_selector.py   # 自动凑票
+  runtime_paths.py      # 源码/EXE 数据路径
+  ui_widgets.py         # 勾选控件
+requirements.txt        # 应用依赖
+requirements-build.txt  # 打包依赖
+tools/                  # 构建与打印组件
+tests/                  # 自动测试
+.github/                # 自动构建
+```
+
+根目录旧的 `test_selector.py` 仅用于手动打印结果，已删除；选票验证统一在 `tests/` 中运行。数据目录不随代码模块搬迁，源码版仍使用根目录 `invoices.db`，EXE 版仍使用 EXE 旁的 `data/`。

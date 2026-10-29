@@ -5,9 +5,9 @@ import tkinter as tk
 import unittest
 from unittest.mock import patch
 
-import database
-from app import InvoiceApp
-from read_invoice import import_invoices
+from invoice_manager import database
+from invoice_manager.app import InvoiceApp
+from invoice_manager.read_invoice import import_invoices
 
 
 class InventoryActionTests(unittest.TestCase):
@@ -40,27 +40,27 @@ class InventoryActionTests(unittest.TestCase):
         x, y, width, height = app.table.bbox(self.number, 'seller')
         from types import SimpleNamespace
         event = SimpleNamespace(y=y + height // 2)
-        with patch('app.simpledialog.askstring', return_value='  已核对  ') as dialog:
+        with patch('invoice_manager.app.simpledialog.askstring', return_value='  已核对  ') as dialog:
             app.edit_remark(event)
         self.assertEqual(database.list_invoices()[0]['remark'], '已核对')
         self.assertEqual(dialog.call_args.kwargs['initialvalue'], '')
-        with patch('app.simpledialog.askstring', return_value=None):
+        with patch('invoice_manager.app.simpledialog.askstring', return_value=None):
             app.edit_remark()
         self.assertEqual(database.list_invoices()[0]['remark'], '已核对')
-        with patch('app.simpledialog.askstring', return_value=''):
+        with patch('invoice_manager.app.simpledialog.askstring', return_value=''):
             app.edit_remark()
         self.assertEqual(database.list_invoices()[0]['remark'], '')
-        with patch('app.simpledialog.askstring') as dialog:
+        with patch('invoice_manager.app.simpledialog.askstring') as dialog:
             app.edit_remark(SimpleNamespace(y=app.table.winfo_height() + 10))
         dialog.assert_not_called()
 
     def test_delete_confirmation_and_keep_pdf(self):
         _, app = self.app()
         app.table.selection_set(self.number)
-        with patch('app.messagebox.askyesno', return_value=False):
+        with patch('invoice_manager.app.messagebox.askyesno', return_value=False):
             app.delete_selected()
         self.assertEqual(len(database.list_invoices()), 1)
-        with patch('app.messagebox.askyesno', return_value=True):
+        with patch('invoice_manager.app.messagebox.askyesno', return_value=True):
             app.delete_selected()
         self.assertEqual(database.list_invoices(), [])
         self.assertEqual(app.table.get_children(), ())

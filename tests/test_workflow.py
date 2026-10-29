@@ -8,9 +8,9 @@ import time
 import unittest
 from unittest.mock import patch
 
-import database
-from app import InvoiceApp, filter_invoices, reimbursement_inputs
-from read_invoice import import_invoices
+from invoice_manager import database
+from invoice_manager.app import InvoiceApp, filter_invoices, reimbursement_inputs
+from invoice_manager.read_invoice import import_invoices
 
 
 class WorkflowTests(unittest.TestCase):
@@ -37,8 +37,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(database.list_invoices()), 1)
 
     def test_import_module_has_no_database_side_effect(self):
-        with patch('database.init_db', side_effect=AssertionError('unexpected write')):
-            import read_invoice
+        with patch('invoice_manager.database.init_db', side_effect=AssertionError('unexpected write')):
+            from invoice_manager import read_invoice
             importlib.reload(read_invoice)
 
     def test_status_transaction_and_filters(self):
@@ -74,7 +74,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(str(app.delete_button['state']), 'disabled')
         app.reset_filters()
         app.select_all()
-        with patch('app.simpledialog.askstring', return_value='已核对'):
+        with patch('invoice_manager.app.simpledialog.askstring', return_value='已核对'):
             app.edit_remark()
         self.assertEqual(database.list_invoices()[0]['remark'], '已核对')
         root.update()
@@ -100,7 +100,7 @@ class WorkflowTests(unittest.TestCase):
             database.update_status_batch([number], 'available')
 
     def test_selector_exact_match_and_available_only(self):
-        from invoice_selector import select_invoice_combination
+        from invoice_manager.invoice_selector import select_invoice_combination
         rows = [dict(invoice_number=str(i), total_amount_fen=amount,
                      invoice_date='2026-10-01', status=status)
                 for i, (amount, status) in enumerate([(42800, 'available'), (23200, 'available'),
@@ -111,7 +111,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(select_invoice_combination([rows[-1]], 50000), [])
 
     def test_nearest_above_and_below(self):
-        from invoice_selector import select_invoice_combination
+        from invoice_manager.invoice_selector import select_invoice_combination
         def rows(amounts):
             return [dict(invoice_number=str(i), invoice_date='2026-10-01',
                          total_amount_fen=value, status='available') for i, value in enumerate(amounts)]
@@ -206,11 +206,11 @@ class WorkflowTests(unittest.TestCase):
         app.workflow.confirm_proposal()
         view = app.workflow.batch_view
         destination = str(Path(self.temp.name) / 'export.zip')
-        with patch('batch_view.filedialog.asksaveasfilename', return_value=destination):
+        with patch('invoice_manager.batch_view.filedialog.asksaveasfilename', return_value=destination):
             view.export()
         self.assertTrue(Path(destination).is_file())
         self.assertEqual(database.list_invoices()[0]['status'], 'reserved')
-        with patch('batch_view.print_command', return_value=['mock']), patch('batch_view.submit_print'):
+        with patch('invoice_manager.batch_view.print_command', return_value=['mock']), patch('invoice_manager.batch_view.submit_print'):
             view.print_checked()
             deadline = time.monotonic() + 5
             while view.busy and time.monotonic() < deadline:
@@ -239,7 +239,7 @@ class WorkflowTests(unittest.TestCase):
         app.workflow.confirm_proposal()
         view = app.workflow.batch_view
         database.update_printed_batch([view.rows[0]['invoice_number']], True)
-        with patch('batch_view.messagebox.askyesno', return_value=True):
+        with patch('invoice_manager.batch_view.messagebox.askyesno', return_value=True):
             view.request_finish('cancelled')
         root.update()
         self.assertIsNone(app.workflow.batch_view)

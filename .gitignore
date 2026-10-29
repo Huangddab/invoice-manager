@@ -1,21 +1,28 @@
-# Python caches and local environments
+# Python environments and caches
+.venv*/
+venv/
+.build-venv/
 __pycache__/
 *.py[cod]
-.venv/
-venv/
-# Managed originals are personal data. Back up together with invoices.db.
-managed_pdfs/
-# Generated output
-exports/
 .pytest_cache/
 
-# Packaged application and portable user data
+# Build outputs
 build/
 dist/
 *.spec
-data/
 frozen-check.json
 
-# Dedicated Windows build environment
-.build-venv/
-.venv*/
+# Private data and generated output (historical tracked files are preserved)
+data/
+managed_pdfs/
+exports/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Local editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

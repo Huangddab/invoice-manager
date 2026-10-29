@@ -6,9 +6,9 @@ import unittest
 from unittest.mock import patch
 
 import fitz
-import database
-from invoice_files import display_invoice_number, export_name
-from read_invoice import extract_invoice_identity, extract_total_amount, import_invoices, parse_invoice, parse_invoice_text
+from invoice_manager import database
+from invoice_manager.invoice_files import display_invoice_number, export_name
+from invoice_manager.read_invoice import extract_invoice_identity, extract_total_amount, import_invoices, parse_invoice, parse_invoice_text
 
 
 LEGACY = '''深圳电子普通发票
@@ -59,7 +59,7 @@ class ParsingTests(unittest.TestCase):
                 database.init_db()
                 pdf = directory / 'legacy.pdf'
                 self.make_pdf(pdf, LEGACY)
-                with patch('read_invoice.read_invoice_text', return_value='乱码 362.00'):
+                with patch('invoice_manager.read_invoice.read_invoice_text', return_value='乱码 362.00'):
                     row = parse_invoice(pdf)
                     self.assertEqual(row['total_amount'], Decimal('362.00'))
                     self.assertEqual(row['seller'], '示例餐饮公司')

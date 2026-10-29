@@ -9,10 +9,10 @@ from unittest.mock import patch
 import zipfile
 
 import fitz
-import database
-from batch_view import BatchView
-from invoice_files import batch_export_name, prepare_windows_images, export_name, export_zip, original_path, prepare_print_pdf, print_command, submit_print
-from read_invoice import import_invoices
+from invoice_manager import database
+from invoice_manager.batch_view import BatchView
+from invoice_manager.invoice_files import batch_export_name, prepare_windows_images, export_name, export_zip, original_path, prepare_print_pdf, print_command, submit_print
+from invoice_manager.read_invoice import import_invoices
 
 
 class OutputTests(unittest.TestCase):
@@ -103,7 +103,7 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(batch_export_name('2026-10', 8000, rows), '2026-10应报销：80实际报销：90差额10.zip')
         self.assertNotIn(':', batch_export_name('2026-10', 10000, rows))
         _, view = self.make_view()
-        with patch('batch_view.filedialog.asksaveasfilename', return_value='') as dialog:
+        with patch('invoice_manager.batch_view.filedialog.asksaveasfilename', return_value='') as dialog:
             view.export()
         self.assertEqual(dialog.call_args.kwargs['initialfile'], '2026-10应报销：500实际报销：428差额-72.zip')
 
@@ -114,7 +114,7 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(len(list(images.glob('*.png'))), 1)
         pixmap = fitz.Pixmap(str(next(images.glob('*.png'))))
         self.assertEqual(pixmap.n, 1)
-        with patch('invoice_files.sys.platform', 'win32'), patch('invoice_files.shutil.which', return_value=None):
+        with patch('invoice_manager.invoice_files.sys.platform', 'win32'), patch('invoice_manager.invoice_files.shutil.which', return_value=None):
             command = print_command(destination)
         self.assertEqual(command[0], 'powershell.exe')
         self.assertIn('-STA', command)
@@ -124,18 +124,18 @@ class OutputTests(unittest.TestCase):
         self.assertIn('Landscape = $true', script)
         self.assertIn('Color = $false', script)
         self.assertIn('exit 2', script)
-        with patch('invoice_files.subprocess.run') as runner:
+        with patch('invoice_manager.invoice_files.subprocess.run') as runner:
             runner.return_value.returncode = 2
             with self.assertRaisesRegex(RuntimeError, '已取消打印'):
                 submit_print(command)
         self.assertEqual(database.list_invoices()[0]['is_printed'], 0)
 
     def test_windows_print_settings_and_failed_command(self):
-        with patch('invoice_files.sys.platform', 'win32'):
+        with patch('invoice_manager.invoice_files.sys.platform', 'win32'):
             command = print_command('print.pdf', 'SumatraPDF.exe')
         self.assertIn('paper=A5,landscape,monochrome,fit', command)
         self.assertIn('-print-dialog', command)
-        with patch('invoice_files.subprocess.run') as runner:
+        with patch('invoice_manager.invoice_files.subprocess.run') as runner:
             runner.return_value.returncode = 1
             runner.return_value.stderr = 'printer unavailable'
             with self.assertRaises(RuntimeError):
@@ -161,8 +161,8 @@ class OutputTests(unittest.TestCase):
 
     def run_print(self, success_confirmation, submit_error=None):
         root, view = self.make_view()
-        with patch('batch_view.print_command', return_value=['mock']), \
-             patch('batch_view.submit_print', side_effect=submit_error):
+        with patch('invoice_manager.batch_view.print_command', return_value=['mock']), \
+             patch('invoice_manager.batch_view.submit_print', side_effect=submit_error):
             view.print_checked()
             deadline = time.monotonic() + 5
             while view.busy and time.monotonic() < deadline:
@@ -192,8 +192,8 @@ class OutputTests(unittest.TestCase):
 
     def test_cancel_print_leaves_state(self):
         _, view = self.make_view()
-        with patch('batch_view.print_command', side_effect=FileNotFoundError('no printer')), \
-             patch('batch_view.submit_print') as submit:
+        with patch('invoice_manager.batch_view.print_command', side_effect=FileNotFoundError('no printer')), \
+             patch('invoice_manager.batch_view.submit_print') as submit:
             view.print_checked()
             submit.assert_not_called()
         self.assertFalse(view.busy)
@@ -212,11 +212,11 @@ class OutputTests(unittest.TestCase):
 
     def test_popup_release_reservation(self):
         _, view = self.make_view()
-        with patch('batch_view.messagebox.askyesno', return_value=False):
+        with patch('invoice_manager.batch_view.messagebox.askyesno', return_value=False):
             view.request_finish('cancelled')
         self.assertEqual(database.list_invoices()[0]['status'], 'reserved')
         self.assertEqual(len(database.list_reimbursement_batches()), 1)
-        with patch('batch_view.messagebox.askyesno', return_value=True):
+        with patch('invoice_manager.batch_view.messagebox.askyesno', return_value=True):
             view.request_finish('cancelled')
         self.assertEqual(database.list_invoices()[0]['status'], 'available')
         self.assertEqual(database.list_reimbursement_batches(), [])
@@ -225,12 +225,12 @@ class OutputTests(unittest.TestCase):
     def test_open_original_works_immediately_without_clicking_row(self):
         _, view = self.make_view()
         self.assertEqual(view.tree.selection(), (self.number,))
-        with patch('app.open_document') as opener:
+        with patch('invoice_manager.app.open_document') as opener:
             view.open_pdf()
         opener.assert_called_once_with(original_path(self.rows[0]))
         self.assertIn('正在打开 PDF', view.feedback.get())
         view.check_all(False)
-        with patch('app.open_document') as opener:
+        with patch('invoice_manager.app.open_document') as opener:
             view.open_pdf()
         opener.assert_called_once()
 
@@ -241,16 +241,16 @@ class OutputTests(unittest.TestCase):
         self.assertIn('请先点击', view.feedback.get())
         view.tree.selection_set(self.number)
         original_path(self.rows[0]).unlink()
-        with patch('app.open_document') as opener:
+        with patch('invoice_manager.app.open_document') as opener:
             view.open_pdf()
         opener.assert_not_called()
         self.assertIn('无法打开', view.feedback.get())
 
     def test_windows_missing_default_reader_has_actionable_error(self):
-        from app import open_document
+        from invoice_manager.app import open_document
         error = OSError('no association')
         error.winerror = 1155
-        with patch('app.sys.platform', 'win32'), patch('app.os.startfile', create=True, side_effect=error):
+        with patch('invoice_manager.app.sys.platform', 'win32'), patch('invoice_manager.app.os.startfile', create=True, side_effect=error):
             with self.assertRaisesRegex(OSError, '默认打开方式'):
                 open_document(self.pdf)
 
