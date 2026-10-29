@@ -160,8 +160,9 @@ class CategoryTests(unittest.TestCase):
 
     def test_ui_import_uses_selected_category(self):
         root, app = self.app()
-        app.import_category.set('其他')
-        app.start_import([self.pdf])
+        with patch('app.filedialog.askopenfilenames', return_value=[str(self.pdf)]) as dialog:
+            app.other_import_button.invoke()
+        self.assertIn('导入其他', dialog.call_args.kwargs['title'])
         deadline = time.monotonic() + 5
         while app.importing and time.monotonic() < deadline:
             root.update()
@@ -169,3 +170,38 @@ class CategoryTests(unittest.TestCase):
         self.assertFalse(app.importing)
         self.assertEqual(database.list_invoices()[0]['category'], 'other')
         self.assertEqual(len(app.workflow.other_rows), 1)
+        self.assertEqual(app.category.get(), '其他')
+
+    def test_meal_import_button_and_cancel_picker(self):
+        root, app = self.app()
+        with patch('app.filedialog.askopenfilenames', return_value=[]):
+            app.import_button.invoke()
+        self.assertFalse(app.importing)
+        self.assertEqual(database.list_invoices(), [])
+        with patch('app.filedialog.askopenfilenames', return_value=[str(self.pdf)]) as dialog:
+            app.import_button.invoke()
+        self.assertIn('导入餐补', dialog.call_args.kwargs['title'])
+        self.assertTrue(all(str(control['state']) == 'disabled' for control in app.import_controls))
+        deadline = time.monotonic() + 5
+        while app.importing and time.monotonic() < deadline:
+            root.update()
+            time.sleep(0.01)
+        self.assertFalse(app.importing)
+        self.assertEqual(database.list_invoices()[0]['category'], 'meal')
+        self.assertEqual(app.category.get(), '餐补')
+        self.assertTrue(all(str(control['state']) == 'normal' for control in app.import_controls))
+
+    def test_scan_folder_routes_to_other_category(self):
+        root, app = self.app()
+        folder = Path(self.temp.name) / 'scan'
+        folder.mkdir()
+        (folder / 'invoice.PDF').write_bytes(self.pdf.read_bytes())
+        with patch('app.filedialog.askdirectory', return_value=str(folder)) as dialog:
+            app.scan_folder('other')
+        self.assertIn('导入其他', dialog.call_args.kwargs['title'])
+        deadline = time.monotonic() + 5
+        while app.importing and time.monotonic() < deadline:
+            root.update()
+            time.sleep(0.01)
+        self.assertFalse(app.importing)
+        self.assertEqual(database.list_invoices()[0]['category'], 'other')

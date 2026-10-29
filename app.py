@@ -78,7 +78,6 @@ class InvoiceApp:
         self.status = tk.StringVar(root, "全部")
         self.printed = tk.StringVar(root, "全部")
         self.category = tk.StringVar(root, "全部")
-        self.import_category = tk.StringVar(root, "餐补")
         self.summary = tk.StringVar(root)
         self.selection_summary = tk.StringVar(root)
         self.month = tk.StringVar(root, date.today().strftime("%Y-%m"))
@@ -109,11 +108,18 @@ class InvoiceApp:
         header = ttk.Frame(outer)
         header.pack(fill="x")
         ttk.Label(header, text="我的发票", style="Title.TLabel").pack(side="left")
-        self.import_button = ttk.Button(header, text="＋ 导入 PDF", command=self.choose_import)
-        self.import_button.pack(side="right")
-        ttk.Combobox(header, textvariable=self.import_category, values=list(CATEGORY.values()), state="readonly", width=6).pack(side="right", padx=5)
-        ttk.Label(header, text="导入分类").pack(side="right")
-        ttk.Button(header, text="扫描发票目录", command=self.scan_folder).pack(side="right", padx=8)
+        self.import_controls = []
+        self.other_import_button = ttk.Button(header, text="＋ 导入其他", command=lambda: self.choose_import('other'))
+        self.other_import_button.pack(side="right", padx=4)
+        self.import_button = ttk.Button(header, text="＋ 导入餐补", command=lambda: self.choose_import('meal'))
+        self.import_button.pack(side="right", padx=4)
+        scan_button = ttk.Menubutton(header, text="扫描文件夹 ▾")
+        scan_menu = tk.Menu(scan_button, tearoff=False)
+        scan_menu.add_command(label="扫描为餐补发票", command=lambda: self.scan_folder('meal'))
+        scan_menu.add_command(label="扫描为其他发票", command=lambda: self.scan_folder('other'))
+        scan_button.configure(menu=scan_menu)
+        scan_button.pack(side="right", padx=4)
+        self.import_controls.extend([self.import_button, self.other_import_button, scan_button])
         ttk.Button(header, text="刷新", command=self.refresh).pack(side="right", padx=8)
         ttk.Label(outer, textvariable=self.summary, style="Summary.TLabel").pack(anchor="w", pady=(0, 16))
         filters = ttk.Frame(outer)
@@ -204,7 +210,7 @@ class InvoiceApp:
                 "已打印" if row["is_printed"] else "未打印", STATUS.get(row["status"], row["status"]), row["remark"]))
         self.table.selection_set([row["invoice_number"] for row in self.visible if row["invoice_number"] in selected])
         self.summary.set(f"全部 {len(self.rows)} 张  ·  当前显示 {len(self.visible)} 张  ·  当前金额 ¥ {money(sum(r['total_amount_fen'] for r in self.visible))}")
-        self.empty.configure(text="还没有发票，点击右上角「导入 PDF」开始。" if not self.rows else
+        self.empty.configure(text="还没有发票，点击右上角「导入餐补」或「导入其他」开始。" if not self.rows else
                              "没有符合条件的发票，试试清空搜索或重置筛选。" if not self.visible else "")
         self.selection_changed()
 
@@ -325,31 +331,37 @@ class InvoiceApp:
         self.history.reload()
         self.notebook.select(self.history_tab)
 
-    def scan_folder(self):
-        chosen = filedialog.askdirectory(parent=self.root, title="选择需要扫描新增 PDF 的文件夹")
+    def scan_folder(self, category):
+        if self.importing:
+            return
+        chosen = filedialog.askdirectory(parent=self.root, title=f"导入{CATEGORY[category]}：选择 PDF 文件夹")
         if not chosen:
             return
         folder = Path(chosen)
         paths = sorted(path for path in folder.glob("*") if path.is_file() and path.suffix.lower() == ".pdf")
         if not paths:
-            self.feedback.set("发票目录中没有 PDF，请点击「导入 PDF」选择文件。")
+            self.feedback.set("发票目录中没有 PDF，请点击「导入餐补」或「导入其他」选择文件。")
             return
-        self.start_import(paths)
+        self.start_import(paths, category)
 
-    def choose_import(self):
+    def choose_import(self, category):
         if self.importing:
             return
-        paths = filedialog.askopenfilenames(parent=self.root, title="选择要导入的发票 PDF（可多选）", filetypes=[("PDF 发票", "*.pdf"), ("所有文件", "*.*")])
+        paths = filedialog.askopenfilenames(parent=self.root, title=f"导入{CATEGORY[category]}发票：选择 PDF（可多选）", filetypes=[("PDF 发票", "*.pdf"), ("所有文件", "*.*")])
         if paths:
-            self.start_import(paths)
+            self.start_import(paths, category)
 
-    def start_import(self, paths):
+    def start_import(self, paths, category="meal"):
         if self.importing:
             return
-        category = next(code for code, label in CATEGORY.items() if label == self.import_category.get())
+        if category not in CATEGORY:
+            self.feedback.set('请选择餐补或其他分类。')
+            return
+        self.importing_category = category
         self.importing = True
-        self.import_button.configure(state="disabled")
-        self.feedback.set(f"正在读取 {len(paths)} 个文件，请稍候…")
+        for control in self.import_controls:
+            control.configure(state="disabled")
+        self.feedback.set(f"正在导入{CATEGORY[category]}：{len(paths)} 个文件…")
         def worker():
             try:
                 self.results.put(import_invoices(paths, category))
@@ -365,10 +377,13 @@ class InvoiceApp:
             self.root.after(100, self.poll_import)
             return
         self.importing = False
-        self.import_button.configure(state="normal")
+        for control in self.import_controls:
+            control.configure(state="normal")
+        self.reset_filters()
+        self.category.set(CATEGORY[self.importing_category])
         self.refresh()
         self.workflow.refresh_other()
-        summary = f"导入完成：新增 {result['added']} 张，重复跳过 {result['duplicates']} 张，失败 {len(result['errors'])} 张。"
+        summary = f"{CATEGORY[self.importing_category]}导入完成：新增 {result['added']} 张，重复跳过 {result['duplicates']} 张，失败 {len(result['errors'])} 张。"
         self.feedback.set(summary)
         self.import_errors.pack_forget()
         if result["errors"]:
