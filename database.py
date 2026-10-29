@@ -6,7 +6,7 @@ DB_PATH = Path(__file__).resolve().parent / "invoices.db"
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
-    
+
     try:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS invoices (
@@ -24,7 +24,7 @@ def init_db():
             )
         """)
         conn.commit()
-        
+
     finally:
         conn.close()
 
@@ -86,6 +86,7 @@ def list_invoices():
                 total_amount_fen,
                 invoice_date,
                 seller,
+                file_path,
                 is_printed,
                 status,
                 remark
@@ -95,11 +96,11 @@ def list_invoices():
         return [dict(row) for row in cursor.fetchall()]
     finally:
         conn.close()
-        
+
 # 更新发票备注
 def update_remark(invoice_number,remark):
     conn = sqlite3.connect(DB_PATH)
-    
+
     try:
         cursor = conn.execute("""
             UPDATE invoices
@@ -118,7 +119,7 @@ def update_printed(invoice_number,is_printed):
         raise ValueError("打印状态必须是True或False")
 
     conn  =sqlite3.connect(DB_PATH)
-    
+
     try:
         cursor = conn.execute("""
             UPDATE invoices
@@ -137,7 +138,7 @@ def update_printed_batch(invoice_numbers, is_printed):
         raise ValueError("打印状态必须是True或False")
 
     conn = sqlite3.connect(DB_PATH)
-    
+
     try:
         cursor = conn.executemany("""
             UPDATE invoices
@@ -145,8 +146,10 @@ def update_printed_batch(invoice_numbers, is_printed):
             WHERE invoice_number = ?
         """, [(int(is_printed), invoice_number) for invoice_number in invoice_numbers])
 
+        if cursor.rowcount != len(invoice_numbers):
+            raise ValueError("部分发票不存在，请刷新后重试")
         conn.commit()
-        return cursor.rowcount == len(invoice_numbers)
+        return True
     except Exception:
         conn.rollback()
         raise
@@ -156,4 +159,17 @@ def update_printed_batch(invoice_numbers, is_printed):
 if __name__ == "__main__":
     init_db()
     print("数据库初始化完成:",DB_PATH)
-    
+
+
+def update_status_batch(invoice_numbers, status):
+    if status not in ("available", "reserved", "used", "unusable"):
+        raise ValueError("无效的使用状态")
+    numbers = list(dict.fromkeys(invoice_numbers))
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.executemany(
+            "UPDATE invoices SET status = ? WHERE invoice_number = ?",
+            [(status, number) for number in numbers],
+        )
+        if cursor.rowcount != len(numbers):
+            raise ValueError("部分发票不存在，请刷新后重试")
+    return True

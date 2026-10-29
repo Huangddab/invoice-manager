@@ -73,78 +73,27 @@ def parse_invoice(pdf_path):
         "file_path": str(pdf_path.resolve()),
     }
     
-init_db() 
-invoice_dir = Path(__file__).resolve().parent / "invoices"
-pdf_file = list(invoice_dir.glob("*.pdf"))
 
-if not pdf_file:
-    print("invoices 文件夹中没有PDF文件")
-# else:
-#     pdf_path = pdf_file[0]
-#     print("正在读取:",pdf_path.name)
-    
-#     text =  read_invoice_text(pdf_path)
-#     print(text)
-
-#     invoice_num = extract_invoice_number(text)
-#     if invoice_num  is None:
-#         print("未识别到发票号码，请人工核对")
-#     else:
-#         print("识别到的发票号码:",invoice_num)
-
-#     total_amount = extract_total_amount(text)
-#     if total_amount is None:
-#         print("未识别到价税合计，请人工核对")
-#     else:
-#         print(f"价税合计：{total_amount:.2f} 元")
-
-#     invoice_date = extract_invoice_date(text)
-#     print("开票日期:",invoice_date)
-
-#     buyer,seller = extract_company_names(text)
-#     print("购买方:",buyer)
-#     print("销售方:",seller)
-
-
-# else:
-#     pdf_path = pdf_file[0]
-#     invoice = parse_invoice(pdf_path)
-
-#     for field, value in invoice.items():
-#         print(f"{field}: {value}")
-
-
-else:
-    invoices = []
-    seen_numbers = set()
-    
-    for pdf_path in pdf_file:
-        invoice = parse_invoice(pdf_path)
-        invoice_number = invoice["invoice_number"]
-        
-        if invoice_number is None:
-            print(f"需要人工核对，未识别到发票号：{pdf_path.name}")
-            continue
-        
-        if invoice_number in seen_numbers:
-            print(f"跳过重复发票：{pdf_path.name}")
-            continue
+def import_invoices(paths):
+    """Import independently so one unreadable PDF does not stop the batch."""
+    result = {"added": 0, "duplicates": 0, "errors": []}
+    for path in paths:
+        path = Path(path)
         try:
-            saved = save_invoice(invoice)
-        except ValueError as error:
-            print(f"需要人工核对：{pdf_path.name}，原因：{error}")
-            continue
+            invoice = parse_invoice(path)
+            if save_invoice(invoice):
+                result["added"] += 1
+            else:
+                result["duplicates"] += 1
+        except Exception as error:
+            result["errors"].append((path.name, str(error)))
+    return result
 
-        if not saved:
-            print(f"数据库中已存在：{invoice_number}")
-            continue
-        
-        seen_numbers.add(invoice_number)
-        invoices.append(invoice)
-        print(
-            f"{invoice['invoice_number']} | "
-            f"{invoice['seller']} | "
-            f"{invoice['total_amount']} 元"
-        )
 
-    print(f"本次新增 {len(invoices)} 张发票")
+if __name__ == "__main__":
+    init_db()
+    paths = sorted((Path(__file__).resolve().parent / "invoices").glob("*.pdf"))
+    result = import_invoices(paths)
+    print(f"新增 {result['added']} 张，重复 {result['duplicates']} 张，失败 {len(result['errors'])} 张")
+    for name, error in result["errors"]:
+        print(f"{name}: {error}")
