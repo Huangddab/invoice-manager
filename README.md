@@ -12,7 +12,7 @@
 
 ## 自己打包 EXE
 
-构建电脑需要 Windows 和 Python，双击根目录 `build_windows.bat`。输出为 `dist/InvoiceManager.exe`，可以单独复制到其他 Windows 电脑运行。或执行：
+构建电脑需要 Windows 和包含 Tcl/Tk 的 Python，双击根目录 `build_windows.bat`。脚本使用独立 `.build-venv` 构建环境，显式收集 Tcl/Tk 文件，并实际运行 EXE 自检，只有自检通过才更新 `dist/InvoiceManager.exe`。输出为 `dist/InvoiceManager.exe`，可以单独复制到其他 Windows 电脑运行。或执行：
 
 ```powershell
 py tools/build_windows.py
@@ -22,7 +22,7 @@ GitHub Actions 会在相关代码推送后自动构建，也可以手动运行�
 
 ## 开发运行
 
-源码入口只有 `app.py`，旧的 `main.py` 及命令行录入脚本已移除。`database.py`、`read_invoice.py` 等是应用必需模块，不能删除。`windows_print.ps1` 是系统打印组件，打包时会内置到 EXE 中。
+源码入口只有 `app.py`，旧的 `main.py` 及命令行录入脚本已移除。`database.py`、`read_invoice.py` 等是应用必需模块，不能删除。`tools/windows_print.ps1` 是系统打印组件，打包时会内置到 EXE 中，无需手动运行。
 
 ```powershell
 py -m pip install -r requirements.txt
@@ -106,3 +106,20 @@ python -m unittest discover -s tests -v
 测试使用临时数据库，验证自动凑票、报销生命周期、文件保管、原件无损导出、A5 黑白副本、勾选、打印失败/取消/成功确认。GUI 测试需要显示器。打印系统调用使用模拟，不发送真实任务。
 
 已配置的云环境中，使用 `/workspace/invoice-manager-env/bin/python`；虚拟显示器启动后加 `DISPLAY=:99`。
+
+## 目录说明
+
+| 位置 | 用途 |
+|---|---|
+| `build/` | 打包临时文件，可删除后重建 |
+| `dist/InvoiceManager.exe` | 自检通过的单文件程序，可复制到另一台 Windows |
+| `data/`（EXE 旁） | EXE 版数据库、发票原件，必须保留和备份 |
+| `invoices.db`、`managed_pdfs/` | 源码版数据库和原件，必须保留和备份 |
+| `invoices/` | 原先的发票存放目录，勿当缓存删除 |
+| `.venv*` | 本机 Python 虚拟环境；当前正在使用的环境需保留 |
+| `.build-venv/` | 打包专用环境，可删除后重建 |
+| `tools/` | 打包入口、构建及 Windows 打印组件 |
+| `tests/` | 自动测试 |
+| `.github/` | GitHub 自动构建配置 |
+
+旧的文件夹版 `dist/InvoiceManager/` 可能仍留在本机；新构建不会使用它，也不会自动删除其中可能存在的数据。请先检查、备份，再自行移除旧版。不要将旧文件夹里的 EXE 单独取出运行。

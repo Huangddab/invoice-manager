@@ -14,4 +14,8 @@ def data_directory():
 
 
 def resource_path(name):
-    return Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent)) / name
+    if getattr(sys, 'frozen', False):
+        return Path(sys._MEIPASS) / name
+    root = Path(__file__).resolve().parent
+    tool = root / 'tools' / name
+    return tool if tool.is_file() else root / name

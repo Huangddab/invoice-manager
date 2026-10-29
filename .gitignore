@@ -15,3 +15,7 @@ dist/
 *.spec
 data/
 frozen-check.json
+
+# Dedicated Windows build environment
+.build-venv/
+.venv*/
