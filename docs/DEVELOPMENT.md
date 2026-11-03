@@ -88,6 +88,7 @@ DISPLAY=:99 PYTHONDONTWRITEBYTECODE=1 \
 | [invoice_files.py](../invoice_manager/invoice_files.py) | PDF 定位、命名、文件夹原件导出、原尺寸 PDF 合并及系统打印命令 |
 | [reimbursement.py](../invoice_manager/reimbursement.py) | 选票并调用数据库事务创建报销单 |
 | [settings.py](../invoice_manager/settings.py) | 原子保存导出目录和每日标准 |
+| [folder_sync.py](../invoice_manager/folder_sync.py) | 后台扫描、两次稳定检查及持久化文件指纹 |
 | [import_results.py](../invoice_manager/import_results.py) | 逐文件处理结果、失败原因、复制和重试 |
 | [runtime_paths.py](../invoice_manager/runtime_paths.py) | 源码与 EXE 模式的数据、资源路径 |
 | [ui_widgets.py](../invoice_manager/ui_widgets.py) | 24 像素勾选图标 |
@@ -112,7 +113,8 @@ DISPLAY=:99 PYTHONDONTWRITEBYTECODE=1 \
 ```text
 data-directory/
   invoices.db        # 库存和报销历史
-  settings.json      # 导出目录及每日标准，原子写入，Git 忽略
+  settings.json      # 导出目录、每日标准及同步开关/分类目录
+  folder-sync.json   # 已处理文件指纹，原子写入，Git 忽略
   managed_pdfs/      # 保管的原始 PDF
   invoices/          # 可选：旧版原始 PDF 位置
 ```
@@ -218,6 +220,10 @@ data-directory/
 
 已完成历史使用独立查看窗口，不替换当前待办。其他待办不能覆盖当前办理中的单据。完成报销、取消、删除、标记已打印使用二次确认弹窗，默认“否”；生成无需确认。错误弹窗，普通成功页面提示。
 
+自动同步通过 Tk 定时器每 10 秒触发，目录枚举与 stat 在工作线程，UI/队列分发在主线程；与手动导入共享 `importing` 守卫，不并发写入导入任务。先后两次扫描的 `(category, size, mtime_ns)` 一致且未处理时才排队，真正开始前再次复核指纹。暂停或目录配置变化会丢弃过期扫描结果。
+
+导入完成后才原子保存本次已处理指纹，进程中断后未登记的文件可在重启后补查；既有库存依靠数据库去重。成功、重复和失败均记住，避免重复报错和已删库存被原目录自动恢复；手动扫描不受增量缓存限制。源目录删除仅影响发现，不删除数据库。目录失联在状态栏报告，后续定时重试。
+
 导入结果包含 `added`、`duplicates`、`errors` 和逐文件 `items`。失败保存完整路径及实际原因；有失败自动打开结果窗口，底部按钮可重开、复制失败明细、仅重试存在的失败文件并沿用原分类。
 
 ```mermaid
@@ -280,6 +286,7 @@ stateDiagram-v2
 | `test_inventory_actions.py` | 弹窗备注、删除确认、保留原件与关联保护 |
 | `test_parsing.py` | 传统票、乱码备用提取、身份去重及金额 |
 | `test_outputs.py` | 无损导出、打印文件规格、取消/失败/成功确认、打开 PDF |
+| `test_folder_sync.py` | 稳定写入、暂停恢复、跨重启增量、删除保护、排队后变更及筛选保留 |
 | `test_import_results.py` | 合成 PDF 的失败分类、自动详情、复制、重试和完整路径 |
 | `test_runtime_paths.py` | 源码与冻结路径、数据覆盖目录 |
 | `test_windows_build.py` | Tcl/Tk 与 zipfs、EXE 自检、锁定旧程序时的更新 |

@@ -12,8 +12,15 @@ def load_settings():
         value = json.loads((database.DB_PATH.parent / 'settings.json').read_text(encoding='utf-8'))
         if not isinstance(value, dict):
             return {}
-        return {key: setting for key, setting in value.items()
-                if key in ('export_root', 'daily_allowance') and isinstance(setting, str)}
+        result = {key: setting for key, setting in value.items()
+                  if key in ('export_root', 'daily_allowance') and isinstance(setting, str)}
+        if type(value.get('auto_sync')) is bool:
+            result['auto_sync'] = value['auto_sync']
+        folders = value.get('scan_folders')
+        if isinstance(folders, dict):
+            result['scan_folders'] = {category: path for category, path in folders.items()
+                                      if category in ('meal', 'other') and isinstance(path, str) and path}
+        return result
     except (OSError, ValueError):
         return {}
 

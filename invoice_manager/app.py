@@ -14,7 +14,8 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from invoice_manager import database
 from invoice_manager.invoice_files import display_invoice_number
 from invoice_manager.read_invoice import import_invoices
-from invoice_manager.settings import load_settings
+from invoice_manager.settings import load_settings, save_settings
+from invoice_manager.folder_sync import FolderSync, fingerprint, scan_directories
 
 CATEGORY = {"meal": "餐补", "other": "其他"}
 
@@ -76,6 +77,14 @@ class InvoiceApp:
         self.last_import_result = None
         self.import_result_window = None
         self.results = queue.Queue()
+        settings = load_settings()
+        self.scan_folders = settings.get('scan_folders', {})
+        self.folder_sync = FolderSync()
+        self.auto_sync = tk.BooleanVar(root, settings.get('auto_sync', True))
+        self.sync_status = tk.StringVar(root)
+        self.sync_scanning = False
+        self.sync_results = queue.Queue()
+        self.sync_pending = []
         self.query = tk.StringVar(root)
         self.status = tk.StringVar(root, "全部")
         self.printed = tk.StringVar(root, "全部")
@@ -123,6 +132,11 @@ class InvoiceApp:
         self.import_controls.extend([self.import_button, self.other_import_button, scan_button])
         ttk.Button(header, text="刷新", command=self.refresh).pack(side="right", padx=8)
         ttk.Label(outer, textvariable=self.summary, style="Summary.TLabel").pack(anchor="w", pady=(0, 16))
+        sync_bar = ttk.Frame(outer)
+        sync_bar.pack(fill='x', pady=(0, 8))
+        ttk.Checkbutton(sync_bar, text='自动同步扫描目录', variable=self.auto_sync, command=self.toggle_sync).pack(side='left')
+        ttk.Button(sync_bar, text='同步目录设置', command=self.show_sync_folders).pack(side='left', padx=8)
+        ttk.Label(sync_bar, textvariable=self.sync_status, wraplength=650).pack(side='left')
         filters = ttk.Frame(outer)
         filters.pack(fill="x", pady=(0, 12))
         ttk.Label(filters, text="搜索").pack(side="left")
@@ -187,6 +201,8 @@ class InvoiceApp:
         for variable in (self.query, self.status, self.printed, self.category):
             variable.trace_add("write", lambda *args: self.render())
         self.refresh()
+        self.update_sync_status()
+        self.root.after(1000, self.check_sync)
 
     def refresh(self):
         try:
@@ -358,8 +374,20 @@ class InvoiceApp:
             self.feedback.set(f'扫描文件夹失败：{folder}：{error}')
             messagebox.showerror('扫描文件夹失败', f'{folder}\n{error}', parent=self.root)
             return
+        folder = str(folder.resolve())
+        previous = dict(self.scan_folders)
+        # One source directory has one category; an explicit new scan changes its assignment.
+        self.scan_folders = {key: path for key, path in self.scan_folders.items() if Path(path) != Path(folder)}
+        self.scan_folders[category] = folder
+        try:
+            save_settings(scan_folders=self.scan_folders)
+        except OSError as error:
+            self.scan_folders = previous
+            messagebox.showerror('保存同步目录失败', str(error), parent=self.root)
+            return
+        self.update_sync_status()
         if not paths:
-            self.feedback.set("发票目录中没有 PDF，请点击「导入餐补」或「导入其他」选择文件。")
+            self.feedback.set('目录暂无 PDF，已记住该目录；开启自动同步后会检查新增发票。')
             return
         self.start_import(paths, category)
 
@@ -370,20 +398,45 @@ class InvoiceApp:
         if paths:
             self.start_import(paths, category)
 
-    def start_import(self, paths, category="meal"):
+    def start_import(self, paths, category="meal", automatic=False, signatures=None):
         if self.importing:
             return
         if category not in CATEGORY:
             self.feedback.set('请选择餐补或其他分类。')
             return
         self.importing_category = category
+        self.importing_automatic = automatic
+        self.import_signatures = dict(signatures or {})
+        if signatures is None:
+            watched = {Path(folder) for folder in self.scan_folders.values()}
+            for path in paths:
+                path = Path(path).resolve()
+                if path.parent in watched:
+                    try:
+                        self.import_signatures[str(path)] = fingerprint(path, category)
+                    except OSError:
+                        pass
         self.importing = True
         for control in self.import_controls:
             control.configure(state="disabled")
         self.feedback.set(f"正在导入{CATEGORY[category]}：{len(paths)} 个文件…")
         def worker():
             try:
-                self.results.put(import_invoices(paths, category))
+                selected_paths = paths
+                accepted = {}
+                if automatic:
+                    # A queued batch may have waited behind another import. Recheck stability.
+                    for path, token in signatures.items():
+                        try:
+                            if fingerprint(path, category) == token:
+                                accepted[path] = token
+                        except OSError:
+                            pass
+                    selected_paths = list(accepted)
+                result = import_invoices(selected_paths, category)
+                if automatic:
+                    result['_sync_signatures'] = accepted
+                self.results.put(result)
             except Exception as error:
                 self.results.put({"added": 0, "duplicates": 0, "errors": [(str(Path(path).resolve()), f"{type(error).__name__}：{error}") for path in paths]})
         threading.Thread(target=worker, daemon=True).start()
@@ -398,16 +451,122 @@ class InvoiceApp:
         self.importing = False
         for control in self.import_controls:
             control.configure(state="normal")
-        self.reset_filters()
-        self.category.set(CATEGORY[self.importing_category])
+        if not self.importing_automatic:
+            self.reset_filters()
+            self.category.set(CATEGORY[self.importing_category])
         self.refresh()
         self.workflow.refresh_other()
         summary = f"{CATEGORY[self.importing_category]}导入完成：新增 {result['added']} 张，重复跳过 {result['duplicates']} 张，失败 {len(result['errors'])} 张。"
         self.feedback.set(summary)
+        completed_signatures = result.pop('_sync_signatures', self.import_signatures)
+        if completed_signatures:
+            try:
+                self.folder_sync.remember(completed_signatures)
+            except OSError as error:
+                self.sync_status.set(f'同步记录未保存：{error}；重启后可能重新检查，但不会重复入库。')
+        if self.importing_automatic:
+            prefix = '自动同步' if self.auto_sync.get() else '自动同步已暂停，本次处理完成'
+            self.sync_status.set(f'{prefix}：新增 {result["added"]}，重复 {result["duplicates"]}，失败 {len(result["errors"])}')
         self.last_import_result = dict(result, category=self.importing_category, summary=summary)
         self.import_details_button.configure(state='normal')
         if result['errors']:
             self.show_import_details()
+        if self.sync_pending:
+            self.root.after(0, self.import_next_sync)
+
+    def update_sync_status(self):
+        if not self.auto_sync.get():
+            self.sync_status.set('已暂停')
+        elif not self.scan_folders:
+            self.sync_status.set('选择扫描目录后自动启用，每 10 秒检查一次')
+        else:
+            self.sync_status.set('已开启：' + '、'.join(CATEGORY[key] for key in self.scan_folders))
+
+    def toggle_sync(self):
+        try:
+            save_settings(auto_sync=self.auto_sync.get())
+        except OSError as error:
+            messagebox.showerror('保存同步开关失败', str(error), parent=self.root)
+        if not self.auto_sync.get():
+            self.sync_pending.clear()
+        self.update_sync_status()
+
+    def show_sync_folders(self):
+        window = tk.Toplevel(self.root)
+        window.title('同步目录设置')
+        window.geometry('800x250')
+        window.transient(self.root)
+        ttk.Label(window, text='每类记住一个目录，仅检查该目录内的 PDF。程序关闭期间不运行，重启后补查新增文件。', padding=12, wraplength=750).pack(anchor='w')
+        for category in CATEGORY:
+            row = ttk.Frame(window, padding=8)
+            row.pack(fill='x')
+            ttk.Label(row, text=f'{CATEGORY[category]}：{self.scan_folders.get(category, "未设置")}', wraplength=570).pack(side='left')
+            def choose(value=category):
+                window.destroy()
+                self.scan_folder(value)
+            def remove(value=category):
+                folders = {key: path for key, path in self.scan_folders.items() if key != value}
+                try:
+                    save_settings(scan_folders=folders)
+                except OSError as error:
+                    messagebox.showerror('保存同步目录失败', str(error), parent=window)
+                    return
+                self.scan_folders = folders
+                self.sync_pending.clear()
+                self.update_sync_status()
+                window.destroy()
+            ttk.Button(row, text='选择目录', command=choose).pack(side='right')
+            ttk.Button(row, text='移除', command=remove).pack(side='right', padx=6)
+        ttk.Button(window, text='关闭', command=window.destroy).pack(pady=8)
+
+    def check_sync(self):
+        self.root.after(10000, self.check_sync)
+        if not self.auto_sync.get() or not self.scan_folders or self.importing or self.sync_scanning:
+            return
+        if self.sync_pending:
+            self.import_next_sync()
+            return
+        self.sync_scanning = True
+        folders = dict(self.scan_folders)
+        def worker():
+            try:
+                self.sync_results.put((folders, scan_directories(folders)))
+            except Exception as error:
+                self.sync_results.put((folders, ({}, {'扫描': f'{type(error).__name__}：{error}'})))
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(100, self.poll_sync)
+
+    def poll_sync(self):
+        try:
+            folders, (files, errors) = self.sync_results.get_nowait()
+        except queue.Empty:
+            self.root.after(100, self.poll_sync)
+            return
+        self.sync_scanning = False
+        if not self.auto_sync.get() or folders != self.scan_folders:
+            return
+        ready = self.folder_sync.ready(files)
+        if errors:
+            self.sync_status.set('自动同步暂不可用：' + '；'.join(f'{path}：{error}' for path, error in errors.items()))
+        elif not self.importing:
+            self.update_sync_status()
+        for category in CATEGORY:
+            signatures = {path: token for path, token in ready.items() if token[0] == category}
+            if signatures:
+                self.sync_pending.append((category, signatures))
+        self.import_next_sync()
+
+    def import_next_sync(self):
+        if self.importing or not self.auto_sync.get():
+            return
+        while self.sync_pending:
+            category, signatures = self.sync_pending.pop(0)
+            signatures = {path: token for path, token in signatures.items()
+                          if self.folder_sync.attempted.get(path) != token
+                          and self.scan_folders.get(category) == str(Path(path).parent)}
+            if signatures:
+                self.start_import(list(signatures), category, automatic=True, signatures=signatures)
+                return
 
     def show_import_details(self):
         if self.last_import_result is None:
