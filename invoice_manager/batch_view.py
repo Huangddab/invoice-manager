@@ -37,7 +37,7 @@ class BatchView:
         ttk.Button(controls, text='取消全选', command=lambda: self.check_all(False)).pack(side='left', padx=8)
         ttk.Button(controls, text='打开原 PDF', command=self.open_pdf).pack(side='left')
         ttk.Button(controls, text='勾选 PDF 打包导出', command=self.export).pack(side='right', padx=8)
-        self.print_button = ttk.Button(controls, text='打印（A5 横向黑白）', command=self.print_checked)
+        self.print_button = ttk.Button(controls, text='打印（A5 横向）', command=self.print_checked)
         self.print_button.pack(side='right')
         frame = ttk.Frame(self.window, padding=12)
         columns = ('category', 'number', 'date', 'buyer', 'seller', 'amount', 'printed', 'remark')
@@ -180,12 +180,15 @@ class BatchView:
         rows = self.require_rows()
         if not rows:
             return
-        temporary = tempfile.TemporaryDirectory(prefix='invoice-print-')
-        pdf = Path(temporary.name) / 'A5-landscape-grayscale.pdf'
+        # Edge reads asynchronously, so Windows copies must survive this view and app.
+        temporary = None if sys.platform == 'win32' else tempfile.TemporaryDirectory(prefix='invoice-print-')
+        directory = tempfile.mkdtemp(prefix='invoice-print-') if temporary is None else temporary.name
+        pdf = Path(directory) / 'A5-landscape.pdf'
         try:
             command = print_command(pdf)
         except OSError as error:
-            temporary.cleanup()
+            if temporary is not None:
+                temporary.cleanup()
             self.feedback.set(f'无法启动打印：{error}。请检查系统打印机及依赖安装：python -m pip install -r requirements.txt')
             return
         self.busy = True
@@ -205,21 +208,25 @@ class BatchView:
                 if results.empty():
                     self.window.master.after(100, poll)
                 else:
-                    temporary.cleanup()
+                    if temporary is not None:
+                        temporary.cleanup()
                 return
             try:
                 error = results.get_nowait()
             except queue.Empty:
                 self.window.after(100, poll)
                 return
-            temporary.cleanup()
+            if temporary is not None:
+                temporary.cleanup()
             self.busy = False
             self.print_button.configure(state='normal')
             if error is not None:
                 self.feedback.set(f'打印失败：{error}。未修改打印状态。')
                 return
             self.pending_print = [row['invoice_number'] for row in rows]
-            self.feedback.set(f'本次 {len(rows)} 张是否全部出纸成功？')
+            self.feedback.set(
+                f'已在 Edge 打开 {len(rows)} 张发票。请按 Ctrl+P，选择 A5、横向、黑白、每张一页，关闭页眉页脚；核对预览并打印。出纸后再确认。'
+                if sys.platform == 'win32' else f'本次 {len(rows)} 张是否全部出纸成功？')
             self.show_confirmation('全部实际打印成功')
         self.window.after(100, poll)
 

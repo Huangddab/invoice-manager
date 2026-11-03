@@ -15,8 +15,7 @@ def self_check(destination):
     import pypdf
     from invoice_manager import database
     from invoice_manager.invoice_files import prepare_print_pdf
-    from invoice_manager.runtime_paths import data_directory, resource_path
-    assert resource_path('windows_print.ps1').is_file()
+    from invoice_manager.runtime_paths import data_directory
     assert pypdf.__version__
     with tempfile.TemporaryDirectory() as directory:
         temporary = Path(directory)
@@ -35,7 +34,7 @@ def self_check(destination):
         root.withdraw()
         root.update()
         root.destroy()
-    Path(destination).write_text(json.dumps({'status': 'passed', 'checks': ['sqlite', 'tkinter', 'pypdf', 'pymupdf', 'A5 print copy', 'print resource'], 'data_directory': str(data_directory())}), encoding='utf-8')
+    Path(destination).write_text(json.dumps({'status': 'passed', 'checks': ['sqlite', 'tkinter', 'pypdf', 'pymupdf', 'A5 print copy'], 'data_directory': str(data_directory())}), encoding='utf-8')
 
 
 if __name__ == '__main__':

@@ -1,5 +1,4 @@
 import gc
-import base64
 import hashlib
 from pathlib import Path
 import tempfile
@@ -11,7 +10,7 @@ import zipfile
 import fitz
 from invoice_manager import database
 from invoice_manager.batch_view import BatchView
-from invoice_manager.invoice_files import batch_export_name, prepare_windows_images, export_name, export_zip, original_path, prepare_print_pdf, print_command, submit_print
+from invoice_manager.invoice_files import batch_export_name, export_name, export_zip, original_path, prepare_print_pdf, print_command, submit_print
 from invoice_manager.read_invoice import import_invoices
 
 
@@ -69,7 +68,7 @@ class OutputTests(unittest.TestCase):
             export_zip([dict(self.rows[0], invoice_number='missing', file_path='missing.pdf')], destination)
         self.assertEqual(destination.read_bytes(), b'previous export')
 
-    def test_print_copy_a5_landscape_grayscale_and_original_unchanged(self):
+    def test_print_copy_preserves_vector_text_and_original_unchanged(self):
         source = original_path(self.rows[0])
         before = hashlib.sha256(source.read_bytes()).hexdigest()
         destination = self.directory / 'print.pdf'
@@ -79,11 +78,11 @@ class OutputTests(unittest.TestCase):
             page = document[0]
             self.assertAlmostEqual(page.rect.width, 210 / 25.4 * 72, places=2)
             self.assertAlmostEqual(page.rect.height, 148 / 25.4 * 72, places=2)
-            images = page.get_images()
-            self.assertEqual(len(images), 1)
-            self.assertEqual(fitz.Pixmap(document, images[0][0]).n, 1)
-            bounds = page.get_image_rects(images[0][0])[0]
-            self.assertTrue(page.rect.contains(bounds))
+            with fitz.open(source) as original:
+                original.bake()
+                self.assertEqual(page.get_text(), original[0].get_text(clip=original[0].rect))
+                self.assertEqual(len(page.get_images()), len(original[0].get_images()))
+            self.assertTrue(page.get_text().strip())
         self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), before)
         self.assertEqual(database.list_invoices()[0]['is_printed'], 0)
 
@@ -107,40 +106,28 @@ class OutputTests(unittest.TestCase):
             view.export()
         self.assertEqual(dialog.call_args.kwargs['initialfile'], '2026-10应报销：500实际报销：428差额-72.zip')
 
-    def test_windows_builtin_print_command_and_rendered_images(self):
-        destination = self.directory / 'print.pdf'
-        prepare_print_pdf(self.rows, destination)
-        images = prepare_windows_images(destination)
-        self.assertEqual(len(list(images.glob('*.png'))), 1)
-        pixmap = fitz.Pixmap(str(next(images.glob('*.png'))))
-        self.assertEqual(pixmap.n, 1)
-        with patch('invoice_manager.invoice_files.sys.platform', 'win32'), patch('invoice_manager.invoice_files.shutil.which', return_value=None):
+    def test_windows_opens_pdf_in_edge_without_rasterizing(self):
+        destination = self.directory / 'print with spaces.pdf'
+        with patch('invoice_manager.invoice_files.sys.platform', 'win32'), \
+             patch('invoice_manager.invoice_files.edge_executable', return_value='msedge.exe'):
+            prepare_print_pdf(self.rows, destination)
             command = print_command(destination)
-        self.assertEqual(command[0], 'powershell.exe')
-        self.assertIn('-STA', command)
-        script = base64.b64decode(command[-1]).decode('utf-16-le')
-        self.assertIn('System.Windows.Forms.PrintDialog', script)
-        self.assertIn('PaperKind]::A5', script)
-        self.assertIn('Landscape = $true', script)
-        self.assertIn('Color = $false', script)
-        self.assertIn('exit 2', script)
-        with patch('invoice_manager.invoice_files.subprocess.run') as runner:
-            runner.return_value.returncode = 2
-            with self.assertRaisesRegex(RuntimeError, '已取消打印'):
+            self.assertEqual(command, ['msedge.exe', '--new-window', destination.resolve().as_uri()])
+            self.assertFalse((self.directory / 'native-print-pages').exists())
+            with patch('invoice_manager.invoice_files.subprocess.Popen') as launch:
                 submit_print(command)
+                launch.assert_called_once_with(command)
+            with patch('invoice_manager.invoice_files.subprocess.Popen', side_effect=OSError('launch failed')):
+                with self.assertRaises(OSError):
+                    submit_print(command)
         self.assertEqual(database.list_invoices()[0]['is_printed'], 0)
 
-    def test_windows_print_settings_and_failed_command(self):
-        with patch('invoice_manager.invoice_files.sys.platform', 'win32'):
-            command = print_command('print.pdf', 'SumatraPDF.exe')
-        self.assertIn('paper=A5,landscape,monochrome,fit', command)
-        self.assertIn('-print-dialog', command)
-        with patch('invoice_manager.invoice_files.subprocess.run') as runner:
-            runner.return_value.returncode = 1
-            runner.return_value.stderr = 'printer unavailable'
-            with self.assertRaises(RuntimeError):
-                submit_print(command)
-        self.assertEqual(database.list_invoices()[0]['is_printed'], 0)
+    def test_missing_edge_reports_error(self):
+        with patch('invoice_manager.invoice_files.sys.platform', 'win32'), \
+             patch('invoice_manager.invoice_files.shutil.which', return_value=None), \
+             patch('invoice_manager.invoice_files.os.environ', {}):
+            with self.assertRaisesRegex(FileNotFoundError, 'Edge'):
+                print_command('print.pdf')
 
     def make_view(self):
         import tkinter as tk

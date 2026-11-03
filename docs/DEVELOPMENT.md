@@ -90,7 +90,6 @@ DISPLAY=:99 PYTHONDONTWRITEBYTECODE=1 \
 | [ui_widgets.py](../invoice_manager/ui_widgets.py) | 24 像素勾选图标 |
 | [tools/desktop_entry.py](../tools/desktop_entry.py) | EXE 入口和隔离自检 |
 | [tools/build_windows.py](../tools/build_windows.py) | 独立构建环境、Tcl/Tk 收集、EXE 验证及输出更新 |
-| [tools/windows_print.ps1](../tools/windows_print.ps1) | Windows 系统打印对话框与 .NET 打印组件 |
 | [tests/](../tests/) | 单元测试和真实 Tkinter 交互回归 |
 
 界面模块调用数据库与文件服务，不应直接拼接 SQL。添加新功能时先确定数据与状态规则，再接入界面，避免让界面缓存成为唯一数据来源。
@@ -235,17 +234,15 @@ stateDiagram-v2
 ### 打印管线
 
 1. 在临时目录生成 A5 横向 PDF，5 mm 边距、等比例完整缩放。
-2. 每张发票一页，使用 200 DPI 灰度图；多页原票拒绝自动打印并提示核对。
-3. Windows 生成 PNG，经 PowerShell 的 STA 进程启动 .NET `PrintDialog`；脚本内置到 EXE，无需手动运行或安装 SumatraPDF。
-4. 打印组件核对所选打印机的 A5 能力，设置横向、黑白并提交；Linux/macOS 使用 CUPS `lp`。
-5. 系统取消或命令失败不标记打印。Windows 取消返回码为 2。
-6. 命令成功后仍须点击“全部实际打印成功”，才更新打印状态；不改变使用状态。
-
-`print_command(pdf, sumatra=None)` 仍有显式传入 Sumatra 路径的兼容分支，当前界面默认不使用该分支。排查时优先沿实际原生 Windows 路径调查。
+2. 每张发票一页，使用 `show_pdf_page` 等比例嵌入原 PDF，保留矢量内容和颜色；多页原票拒绝自动打印并提示核对。
+3. Windows 查找 Microsoft Edge，以文件 URI 打开合并 PDF，不生成 PNG、不依赖 PowerShell 或 SumatraPDF。
+4. 用户在 Edge 按 Ctrl+P，选择 A5、横向、黑白、每张一页并核对预览；Linux/macOS 使用 CUPS `lp`。
+5. Windows 副本保留在系统临时目录的 `invoice-print-*` 中，避免 Edge 异步读取时文件已删除，关闭 Edge 后可清理。
+6. 打开 Edge 或提交命令不代表出纸；必须点击“全部实际打印成功”才更新打印状态。取消或失败时在程序点击取消，状态不变。
 
 ### 导出规则
 
-ZIP 内是原始 PDF 字节内容，不能使用灰度打印副本代替。单文件名：
+ZIP 内是原始 PDF 字节内容，不能使用排版后的打印副本代替。单文件名：
 
 ```text
 真实发票号码_销售方名称_真实金额.pdf
@@ -299,7 +296,7 @@ py tools/build_windows.py
 
 构建主机必须是 Windows，Linux 上不直接生成 Windows EXE。资源数据目标固定为 `_tcl_data` 和 `_tk_data`，不能只复制 Tk DLL，忽略 Tcl 脚本目录。虚拟库通过 Tcl 文件系统复制成普通文件，并保持到 PyInstaller 完成。
 
-`tools/desktop_entry.py --self-check <结果路径>` 检查 SQLite、Tk 窗口、PDF 依赖、A5 副本和打印脚本。冻结后由构建脚本实际启动 EXE，要求 60 秒内生成本次结果，且数据目录位于 EXE 同级，才接受产物。
+`tools/desktop_entry.py --self-check <结果路径>` 检查 SQLite、Tk 窗口、PDF 依赖、A5 副本。冻结后由构建脚本实际启动 EXE，要求 60 秒内生成本次结果，且数据目录位于 EXE 同级，才接受产物。
 
 构建中间文件在 `build/verified-output/`。用户应取构建完成时打印的 `dist/` 路径，不以 PyInstaller 单独显示的“Build complete”判断最终更新成功。
 

@@ -24,7 +24,7 @@ GitHub Actions 会在相关代码推送后自动构建，也可以手动运行�
 
 ## 开发运行
 
-源码入口只有 `app.py`，旧的 `main.py` 及命令行录入脚本已移除。应用模块已集中到 `invoice_manager/`，该目录是程序本体，不能删除。`tools/windows_print.ps1` 是系统打印组件，打包时会内置到 EXE 中，无需手动运行。
+源码入口只有 `app.py`，旧的 `main.py` 及命令行录入脚本已移除。应用模块已集中到 `invoice_manager/`，该目录是程序本体，不能删除。Windows 批量打印使用系统中的 Microsoft Edge 打开合并 PDF。
 
 ```powershell
 py -m pip install -r requirements.txt
@@ -66,15 +66,15 @@ py app.py
 
 ## 批量打印
 
-Windows 使用系统自带的 PowerShell、.NET 打印对话框，无需安装 SumatraPDF。先在 Windows 设置中添加打印机，并安装支持 A5 的完整驱动；项目依赖需执行 `python -m pip install -r requirements.txt` 安装。Linux/macOS 使用系统 CUPS 的 `lp`，需先配置默认打印机。
+Windows 使用 Microsoft Edge 打开合并 PDF，由用户在 Edge 中打印，无需安装 SumatraPDF。先在 Windows 设置中添加打印机，并安装支持 A5 的完整驱动；项目依赖需执行 `python -m pip install -r requirements.txt` 安装。Linux/macOS 使用系统 CUPS 的 `lp`，需先配置默认打印机。
 
 在本月报销页的报销单清单中，勾选发票后点击「批量打印 / 重新打印」：
 
-- 生成独立的 **A5、横向、黑白、每张一页** 打印副本，以 5 mm 边距等比例完整缩放，原 PDF 不改动。
-- Windows 打开系统打印对话框，选定打印机后按 A5、横向、黑白和完整缩放打印；不支持 A5 的驱动会明确提示。取消系统打印对话框不会进入打印成功确认。请核对打印机及纸张。Linux/macOS 提交至默认打印机。
+- 生成独立的 **A5、横向、每张一页** 打印副本，以 5 mm 边距等比例完整缩放，保留原 PDF 的矢量文字、线条和颜色，不转图片，原 PDF 不改动。
+- Windows 在 Edge 打开合并 PDF，按 Ctrl+P，选择打印机、A5、横向、黑白、每张一页，并核对预览及缩放后打印。程序不会自动设置 Edge 的打印选项。Linux/macOS 提交至默认打印机。
 - 多页发票将拒绝自动打印并提示人工核对，避免悄悄漏页或裁切。
 - 命令返回成功只代表打印程序接收，**必须实际检查出纸后点击页面内的「全部实际打印成功」，才会标记已打印**。取消、失败、部分成功时点击「取消 / 未全部成功」，状态不变；可重新勾选需要的票重打。
-- 打印与确认报销使用相互独立。云环境仅验证打印文件和交互逻辑，没有实体打印机验证。
+- Windows 打印副本保留在系统临时目录的 `invoice-print-*` 文件夹中，避免 Edge 尚未读取时被删除；关闭 Edge 后可通过系统临时文件清理删除。打印与确认报销使用相互独立。云环境仅验证打印文件和交互逻辑，没有实体打印机验证。
 
 ## 公司命名导出
 

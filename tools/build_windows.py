@@ -101,7 +101,7 @@ def build():
         subprocess.run([
             sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onefile', '--windowed',
             '--name', 'InvoiceManager', '--paths', str(root), '--collect-all', 'pymupdf',
-            '--hidden-import', 'fitz', '--add-data', str(root / 'tools' / 'windows_print.ps1') + ';.',
+            '--hidden-import', 'fitz',
             *tk_args,
             '--distpath', str(staging), '--workpath', str(root / 'build' / 'pyinstaller'),
             '--specpath', str(root / 'build'), str(root / 'tools' / 'desktop_entry.py'),

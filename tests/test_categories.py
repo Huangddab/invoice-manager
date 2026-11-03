@@ -94,6 +94,7 @@ class CategoryTests(unittest.TestCase):
         self.add('other', '80', 'other')
         self.add('unselected', '200', 'other')
         root, app = self.app()
+        app.month.set('2026-10')
         app.days.set('2')
         app.allowance.set('25')
         app.workflow.toggle_other_panel()
