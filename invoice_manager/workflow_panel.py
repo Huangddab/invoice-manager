@@ -1,6 +1,6 @@
-"""Embedded monthly reimbursement flow and history; no application dialogs."""
+"""Embedded monthly reimbursement flow and history."""
 import sqlite3
-from tkinter import ttk
+from tkinter import ttk, messagebox
 import tkinter as tk
 
 from invoice_manager import database
@@ -186,6 +186,10 @@ class MonthlyWorkflow:
             self.feedback.set('请先生成方案。')
             return
         inputs, rows = self.proposal
+        if not messagebox.askyesno('确认方案并预留',
+                f'确认使用此方案创建报销单并预留 {len(rows)} 张发票？\n确认后这些发票将不再参与其他报销方案。',
+                parent=self.confirm, default=messagebox.NO):
+            return
         try:
             batch_id = database.create_reimbursement_batch(*inputs, [row['invoice_number'] for row in rows], expected_categories={row['invoice_number']: row['category'] for row in rows})
         except (ValueError, sqlite3.Error, OverflowError) as error:

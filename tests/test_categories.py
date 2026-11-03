@@ -17,6 +17,9 @@ from invoice_manager.read_invoice import import_invoices, parse_invoice
 
 class CategoryTests(unittest.TestCase):
     def setUp(self):
+        confirmation = patch('invoice_manager.workflow_panel.messagebox.askyesno', return_value=True)
+        confirmation.start()
+        self.addCleanup(confirmation.stop)
         # Collect prior destroyed Tk roots on the UI thread before worker tests.
         gc.collect()
         self.temp = tempfile.TemporaryDirectory()
@@ -88,6 +91,18 @@ class CategoryTests(unittest.TestCase):
         self.add('other', '50', 'other')
         rows = select_invoice_combination(database.list_invoices(), 5000)
         self.assertEqual([row['invoice_number'] for row in rows], ['meal'])
+
+    def test_cancel_proposal_popup_does_not_reserve(self):
+        self.add('meal', '49', 'meal')
+        root, app = self.app()
+        app.days.set('2')
+        app.workflow.generate()
+        with patch('invoice_manager.workflow_panel.messagebox.askyesno', return_value=False) as dialog:
+            app.workflow.confirm_proposal()
+            dialog.assert_called_once()
+        self.assertEqual(database.list_reimbursement_batches(), [])
+        self.assertEqual(database.list_invoices()[0]['status'], 'available')
+        self.assertIsNotNone(app.workflow.proposal)
 
     def test_combined_monthly_flow_and_export_target(self):
         self.add('meal', '49', 'meal')

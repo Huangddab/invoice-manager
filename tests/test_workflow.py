@@ -15,6 +15,9 @@ from invoice_manager.read_invoice import import_invoices
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
+        confirmation = patch('invoice_manager.workflow_panel.messagebox.askyesno', return_value=True)
+        confirmation.start()
+        self.addCleanup(confirmation.stop)
         # Collect prior destroyed Tk roots on the UI thread before worker tests.
         gc.collect()
         self.temp = tempfile.TemporaryDirectory()
@@ -161,11 +164,10 @@ class WorkflowTests(unittest.TestCase):
         view = app.workflow.batch_view
         self.assertTrue(view.finish_button.winfo_ismapped())
         self.assertGreater(view.tree.winfo_height(), 100)
-        view.request_finish('used')
-        root.update()
-        self.assertTrue(view.confirm_button.winfo_ismapped())
-        self.assertLess(view.confirm_button.winfo_rooty() + view.confirm_button.winfo_height(), root.winfo_rooty() + root.winfo_height())
-        view.dismiss_pending()
+        with patch('invoice_manager.batch_view.messagebox.askyesno', return_value=False) as dialog:
+            view.request_finish('used')
+            dialog.assert_called_once()
+        self.assertEqual(database.list_invoices()[0]['status'], 'reserved')
 
     def test_changed_target_invalidates_unconfirmed_proposal(self):
         import tkinter as tk
@@ -210,20 +212,17 @@ class WorkflowTests(unittest.TestCase):
             view.export()
         self.assertTrue(Path(destination).is_file())
         self.assertEqual(database.list_invoices()[0]['status'], 'reserved')
-        with patch('invoice_manager.batch_view.print_command', return_value=['mock']), patch('invoice_manager.batch_view.submit_print'):
+        with patch('invoice_manager.batch_view.print_command', return_value=['mock']), patch('invoice_manager.batch_view.submit_print'), patch('invoice_manager.batch_view.messagebox.askyesno', return_value=True):
             view.print_checked()
             deadline = time.monotonic() + 5
             while view.busy and time.monotonic() < deadline:
                 root.update()
                 time.sleep(0.01)
         self.assertFalse(view.busy)
-        self.assertEqual(database.list_invoices()[0]['is_printed'], 0)
-        view.confirm_pending()
         self.assertEqual(database.list_invoices()[0]['is_printed'], 1)
         self.assertEqual(database.list_invoices()[0]['status'], 'reserved')
-        view.request_finish('used')
-        self.assertEqual(database.list_invoices()[0]['status'], 'reserved')
-        view.confirm_pending()
+        with patch('invoice_manager.batch_view.messagebox.askyesno', return_value=True):
+            view.request_finish('used')
         self.assertEqual(database.list_invoices()[0]['status'], 'used')
         self.assertIn('本单已完成报销', app.workflow.stage.get())
         self.assertEqual(app.history.tree.item('1', 'values')[-1], '已报销')

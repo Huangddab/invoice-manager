@@ -62,10 +62,6 @@ class BatchView:
         self.tree.bind('<Double-1>', self.open_row)
         ttk.Label(self.window, textvariable=self.summary, padding=(12, 4)).pack(anchor='w')
         ttk.Label(self.window, textvariable=self.feedback, padding=(12, 4), wraplength=1000).pack(anchor='w')
-        self.confirmation = ttk.Frame(self.window, padding=(12, 4))
-        self.confirmation.pack(fill='x')
-        self.confirm_button = ttk.Button(self.confirmation, text='确认', command=self.confirm_pending)
-        self.dismiss_button = ttk.Button(self.confirmation, text='取消 / 未全部成功', command=self.dismiss_pending)
         lifecycle = ttk.Frame(self.window, padding=12)
         lifecycle.pack(fill='x')
         self.finish_button = ttk.Button(lifecycle, text='确认已报销', command=lambda: self.request_finish('used'))
@@ -232,15 +228,15 @@ class BatchView:
 
 
     def show_confirmation(self, label):
-        self.confirm_button.configure(text=label)
-        self.confirm_button.pack(side='left', padx=4)
-        self.dismiss_button.pack(side='left', padx=4)
+        if messagebox.askyesno(label, self.feedback.get() + '\n\n' + label + '？\n选择“否”或关闭弹窗，状态不变。',
+                               parent=self.window, default=messagebox.NO):
+            self.confirm_pending()
+        else:
+            self.dismiss_pending()
 
     def dismiss_pending(self):
         self.pending_print = None
         self.pending_action = None
-        self.confirm_button.pack_forget()
-        self.dismiss_button.pack_forget()
         self.feedback.set('已取消，状态未变。')
 
     def request_finish(self, action):
@@ -248,7 +244,7 @@ class BatchView:
             self.feedback.set('请先确认打印结果。')
             return
         if action == 'cancelled':
-            if messagebox.askyesno('取消报销单', '确认取消此报销单？\n将删除该单记录并释放预留发票，原件和打印状态保留。', parent=self.window):
+            if messagebox.askyesno('取消报销单', '确认取消此报销单？\n将删除该单记录并释放预留发票，原件和打印状态保留。', parent=self.window, default=messagebox.NO):
                 self.pending_action = action
                 self.confirm_pending()
             return
@@ -276,8 +272,6 @@ class BatchView:
             return
         self.pending_print = None
         self.pending_action = None
-        self.confirm_button.pack_forget()
-        self.dismiss_button.pack_forget()
         if cancelled:
             self.batch_status = 'cancelled'
             self.rows = []

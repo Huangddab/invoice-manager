@@ -148,22 +148,20 @@ class OutputTests(unittest.TestCase):
 
     def run_print(self, success_confirmation, submit_error=None):
         root, view = self.make_view()
+        def answer(*args, **kwargs):
+            self.assertEqual(database.list_invoices()[0]['is_printed'], 0)
+            return success_confirmation
         with patch('invoice_manager.batch_view.print_command', return_value=['mock']), \
-             patch('invoice_manager.batch_view.submit_print', side_effect=submit_error):
+             patch('invoice_manager.batch_view.submit_print', side_effect=submit_error), \
+             patch('invoice_manager.batch_view.messagebox.askyesno', side_effect=answer) as dialog:
             view.print_checked()
             deadline = time.monotonic() + 5
             while view.busy and time.monotonic() < deadline:
                 root.update()
                 time.sleep(0.01)
             self.assertFalse(view.busy)
-            has_confirmation = view.pending_print is not None
-            # Submission alone must never mark a new invoice printed.
-            self.assertEqual(database.list_invoices()[0]['is_printed'], 0)
-            if success_confirmation:
-                view.confirm_pending()
-            else:
-                view.dismiss_pending()
-            return has_confirmation
+            self.assertIsNone(view.pending_print)
+            return dialog.called
 
     def test_print_requires_actual_success_confirmation(self):
         self.run_print(False)
@@ -186,14 +184,14 @@ class OutputTests(unittest.TestCase):
         self.assertFalse(view.busy)
         self.assertEqual(database.list_invoices()[0]['is_printed'], 0)
 
-    def test_inline_reimbursement_confirmation_and_cancel(self):
+    def test_popup_reimbursement_confirmation_and_cancel(self):
         _, view = self.make_view()
-        view.request_finish('used')
+        with patch('invoice_manager.batch_view.messagebox.askyesno', return_value=False) as dialog:
+            view.request_finish('used')
+            dialog.assert_called_once()
         self.assertEqual(database.list_invoices()[0]['status'], 'reserved')
-        view.dismiss_pending()
-        self.assertEqual(database.list_invoices()[0]['status'], 'reserved')
-        view.request_finish('used')
-        view.confirm_pending()
+        with patch('invoice_manager.batch_view.messagebox.askyesno', return_value=True):
+            view.request_finish('used')
         self.assertEqual(database.list_invoices()[0]['status'], 'used')
         self.assertEqual(str(view.finish_button['state']), 'disabled')
 
