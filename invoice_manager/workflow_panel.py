@@ -1,5 +1,6 @@
 """Embedded monthly reimbursement flow and history."""
 import sqlite3
+from datetime import date
 from tkinter import ttk, messagebox
 import tkinter as tk
 
@@ -7,14 +8,14 @@ from invoice_manager import database
 from invoice_manager.ui_widgets import checkbox_icons
 from invoice_manager.invoice_files import display_invoice_number
 from invoice_manager.batch_view import BatchView
-from invoice_manager.invoice_selector import select_invoice_combination
+from invoice_manager.reimbursement import create_batch
+from invoice_manager.settings import save_settings
 
 
 class MonthlyWorkflow:
     def __init__(self, parent, month, days, allowance, changed):
         self.month, self.days, self.allowance = month, days, allowance
         self.changed = changed
-        self.proposal = None
         self.batch_view = None
         self.other_checked = set()
         self.other_rows = []
@@ -22,14 +23,13 @@ class MonthlyWorkflow:
         self.total = tk.StringVar(parent)
         self.stage = tk.StringVar(parent, '本月报销')
         ttk.Label(parent, textvariable=self.stage, padding=12, font=('', 12, 'bold')).pack(anchor='w')
-        form = ttk.Frame(parent, padding=12)
+        self.form = form = ttk.Frame(parent, padding=12)
         form.pack(fill='x')
         for label, variable, width in [('报销月份', month, 9), ('实际天数', days, 5), ('每日金额（元）', allowance, 8)]:
             ttk.Label(form, text=label).pack(side='left', padx=(0, 5))
             ttk.Entry(form, textvariable=variable, width=width).pack(side='left', padx=(0, 15))
-        ttk.Button(form, text='生成方案', command=self.generate).pack(side='left')
-        self.confirm = ttk.Button(form, text='确认方案并预留', command=self.confirm_proposal, state='disabled')
-        self.confirm.pack(side='left', padx=8)
+        self.generate_button = ttk.Button(form, text='生成报销单', command=self.generate)
+        self.generate_button.pack(side='left')
         self.other_bar = ttk.Frame(parent, padding=(12, 2))
         self.other_bar.pack(fill='x')
         self.other_button = ttk.Button(self.other_bar, text='选择其他发票（0 张）', command=self.toggle_other_panel)
@@ -60,11 +60,8 @@ class MonthlyWorkflow:
         ttk.Label(parent, textvariable=self.feedback, padding=12, wraplength=1050).pack(anchor='w')
         self.body = ttk.Frame(parent)
         self.body.pack(fill='both', expand=True)
-        self.preview = ttk.Treeview(self.body, columns=('category', 'number', 'seller', 'date', 'amount'), show='headings')
-        for key, label in zip(self.preview['columns'], ('分类', '发票号', '销售方', '日期', '金额（元）')):
-            self.preview.heading(key, text=label)
-            self.preview.column(key, width=180)
-        self.preview.pack(fill='both', expand=True, padx=12, pady=12)
+        self.empty = ttk.Label(self.body, text='填写报销信息后点击“生成报销单”。未完成的报销单可在报销历史中继续办理。', padding=12)
+        self.empty.pack(anchor='w')
         for variable in (month, days, allowance):
             variable.trace_add('write', self.inputs_changed)
         self.refresh_other()
@@ -127,109 +124,76 @@ class MonthlyWorkflow:
 
     def inputs_changed(self, *args):
         from invoice_manager.app import reimbursement_inputs, money
-        self.proposal = None
-        self.confirm.configure(state='disabled')
         if self.batch_view is not None:
             self.total.set('')
             return
-        self.preview.delete(*self.preview.get_children())
         try:
             _, days, allowance = reimbursement_inputs(self.month.get().strip(), self.days.get().strip(), self.allowance.get().strip())
             other_total = sum(row['total_amount_fen'] for row in self.other_rows if row['invoice_number'] in self.other_checked)
             self.total.set(f'餐补目标 ¥{money(days * allowance)} · 其他 ¥{money(other_total)} · 合计应报销 ¥{money(days * allowance + other_total)}')
-            if self.batch_view is None:
-                self.feedback.set('')
-        except ValueError as error:
-            self.total.set(str(error))
+        except ValueError:
+            self.total.set('请填写月份、天数和每日标准；只报其他发票时天数填 0。')
 
     def generate(self):
-        from invoice_manager.app import reimbursement_inputs, money
-        if self.batch_view and (self.batch_view.busy or self.batch_view.pending_print is not None or self.batch_view.pending_action is not None):
-            self.feedback.set('请先完成当前确认。')
+        from invoice_manager.app import reimbursement_inputs
+        if self.batch_view is not None:
             return
+        self.generate_button.configure(state='disabled')
         try:
-            inputs = reimbursement_inputs(self.month.get().strip(), self.days.get().strip(), self.allowance.get().strip())
-            month, days, allowance = inputs
-            self.refresh_other()
-            inventory = database.list_invoices()
-            meals = select_invoice_combination(inventory, days * allowance) if days * allowance > 0 else []
-            if days * allowance > 0 and not meals:
-                raise ValueError('暂无可用餐补发票；只报其他发票时，将天数设为 0。')
-            others = [row for row in self.other_rows if row['invoice_number'] in self.other_checked]
-            rows = meals + others
-            if not rows:
-                raise ValueError('暂无可用发票，请到「发票库存」导入。')
-        except (ValueError, sqlite3.Error) as error:
-            self.proposal = None
-            self.confirm.configure(state='disabled')
-            self.feedback.set(str(error))
-            return
-        if self.batch_view:
-            self.batch_view.window.destroy()
-            self.batch_view = None
-        self.preview.pack(fill='both', expand=True, padx=12, pady=12)
-        self.preview.delete(*self.preview.get_children())
-        for row in rows:
-            self.preview.insert('', 'end', values=('餐补' if row['category'] == 'meal' else '其他', display_invoice_number(row), row['seller'], row['invoice_date'], money(row['total_amount_fen'])))
-        total = sum(row['total_amount_fen'] for row in rows)
-        other_total = sum(row['total_amount_fen'] for row in others)
-        target = days * allowance + other_total
-        difference = total - target
-        self.total.set(f'餐补 ¥{money(total-other_total)} / 目标 ¥{money(days*allowance)} · 其他 ¥{money(other_total)} · 合计 ¥{money(total)} · 差额 ¥{money(difference)}')
-        self.proposal = (inputs, rows)
-        self.confirm.configure(state='normal')
-        self.feedback.set('')
-        self.stage.set('确认方案')
-
-    def confirm_proposal(self):
-        if not self.proposal:
-            self.feedback.set('请先生成方案。')
-            return
-        inputs, rows = self.proposal
-        if not messagebox.askyesno('确认方案并预留',
-                f'确认使用此方案创建报销单并预留 {len(rows)} 张发票？\n确认后这些发票将不再参与其他报销方案。',
-                parent=self.confirm, default=messagebox.NO):
-            return
-        try:
-            batch_id = database.create_reimbursement_batch(*inputs, [row['invoice_number'] for row in rows], expected_categories={row['invoice_number']: row['category'] for row in rows})
+            month, days, allowance = reimbursement_inputs(self.month.get().strip(), self.days.get().strip(), self.allowance.get().strip())
+            batch_id = create_batch(month, days, allowance, self.other_checked)
         except (ValueError, sqlite3.Error, OverflowError) as error:
-            self.proposal = None
-            self.confirm.configure(state='disabled')
-            self.feedback.set(f'未创建报销单：{error}。请重新生成方案。')
+            self.feedback.set(f'未创建报销单：{error}')
+            messagebox.showerror('未创建报销单', str(error), parent=self.body)
             return
+        finally:
+            self.generate_button.configure(state='normal')
         self.open_batch(batch_id)
         self.changed()
+        try:
+            save_settings(daily_allowance=self.allowance.get().strip())
+        except OSError as error:
+            messagebox.showwarning('设置未保存', f'报销单已创建，但每日标准未能保存：{error}', parent=self.body)
 
     def open_batch(self, batch_id):
-        if self.batch_view and (self.batch_view.busy or self.batch_view.pending_print is not None or self.batch_view.pending_action is not None):
-            self.feedback.set('请先完成当前确认。')
+        if self.batch_view is not None:
+            if self.batch_view.batch_id == batch_id:
+                return True
+            messagebox.showwarning('有正在办理的报销单', '请先完成或取消当前报销单，再打开其他单据。', parent=self.body)
             return False
-        if self.batch_view:
-            self.batch_view.window.destroy()
-        self.preview.pack_forget()
+        self.empty.pack_forget()
+        self.form.pack_forget()
+        self.other_bar.pack_forget()
         self.other_frame.pack_forget()
         self.total.set('')
-        self.proposal = None
-        self.confirm.configure(state='disabled')
         self.batch_view = BatchView(self.body, batch_id, self.batch_changed)
         self.feedback.set('')
-        self.stage.set('打印 / 导出')
+        self.stage.set('办理报销')
         return True
 
-
-    def batch_changed(self):
-        self.changed()
-        state = self.batch_view.batch_status
-        if state == 'used':
-            self.stage.set('本单已完成报销')
-        elif state == 'cancelled':
+    def reset(self, feedback):
+        if self.batch_view:
             self.batch_view.window.destroy()
             self.batch_view = None
-            self.preview.delete(*self.preview.get_children())
-            self.preview.pack(fill='both', expand=True, padx=12, pady=12)
-            self.stage.set('本月报销')
-            self.inputs_changed()
-            self.feedback.set('已取消，记录已清空。')
+        self.other_checked.clear()
+        self.other_frame.pack_forget()
+        self.month.set(date.today().strftime('%Y-%m'))
+        self.days.set('')
+        self.refresh_other()
+        self.form.pack(fill='x', before=self.total_label)
+        self.other_bar.pack(fill='x', before=self.total_label)
+        self.empty.pack(anchor='w')
+        self.stage.set('本月报销')
+        self.inputs_changed()
+        self.feedback.set(feedback)
+
+    def batch_changed(self):
+        state = self.batch_view.batch_status
+        if state == 'used':
+            self.reset('报销已完成，记录已存入历史。')
+        elif state == 'cancelled':
+            self.reset('已取消，记录已清空，发票已释放。')
+        self.changed()
 
 
 class HistoryPanel:

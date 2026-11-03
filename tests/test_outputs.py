@@ -5,17 +5,19 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
-import zipfile
 
 import fitz
 from invoice_manager import database
 from invoice_manager.batch_view import BatchView
-from invoice_manager.invoice_files import batch_export_name, export_name, export_zip, original_path, prepare_print_pdf, print_command, submit_print
+from invoice_manager.invoice_files import batch_export_name, export_name, export_folder, original_path, prepare_print_pdf, print_command, submit_print
 from invoice_manager.read_invoice import import_invoices
 
 
 class OutputTests(unittest.TestCase):
     def setUp(self):
+        errors = patch('tkinter.messagebox.showerror')
+        errors.start()
+        self.addCleanup(errors.stop)
         # Collect prior destroyed Tk roots on the UI thread before worker tests.
         gc.collect()
         self.temp = tempfile.TemporaryDirectory()
@@ -51,60 +53,118 @@ class OutputTests(unittest.TestCase):
         self.assertNotIn('/', export_name(dict(self.rows[0], seller='公司/餐饮')))
 
     def test_export_original_bytes_and_no_state_change(self):
-        destination = self.directory / 'batch.zip'
-        self.assertEqual(export_zip(self.rows, destination), 1)
-        with zipfile.ZipFile(destination) as archive:
-            self.assertEqual(archive.namelist(), [export_name(self.rows[0])])
-            self.assertEqual(archive.read(archive.namelist()[0]), self.pdf.read_bytes())
+        root = self.directory / 'exports'
+        destination = export_folder(self.rows, root, '2026-11', 90000)
+        self.assertEqual(destination.name, '2026-11应报销：900实际报销：428差额-472')
+        self.assertEqual((destination / export_name(self.rows[0])).read_bytes(), self.pdf.read_bytes())
+        again = export_folder(self.rows, root, '2026-11', 90000)
+        self.assertEqual(again.name, destination.name + ' (2)')
+        self.assertEqual((destination / export_name(self.rows[0])).read_bytes(), self.pdf.read_bytes())
         row = database.list_invoices()[0]
         self.assertEqual((row['status'], row['is_printed']), ('reserved', 0))
         with self.assertRaises(ValueError):
-            export_zip([], destination)
+            export_folder([], root, '2026-11', 90000)
 
-    def test_missing_file_preserves_existing_export(self):
-        destination = self.directory / 'batch.zip'
-        destination.write_bytes(b'previous export')
+    def test_missing_file_and_failed_copy_leave_no_partial_export(self):
+        root = self.directory / 'exports'
+        root.mkdir()
+        old = root / 'existing'
+        old.mkdir()
+        (old / 'keep.pdf').write_bytes(b'keep')
         with self.assertRaises(FileNotFoundError):
-            export_zip([dict(self.rows[0], invoice_number='missing', file_path='missing.pdf')], destination)
-        self.assertEqual(destination.read_bytes(), b'previous export')
+            export_folder([*self.rows, dict(self.rows[0], invoice_number='missing', file_path='missing.pdf')], root, '2026-11', 90000)
+        with patch('invoice_manager.invoice_files.shutil.copyfile', side_effect=OSError('disk full')):
+            with self.assertRaisesRegex(OSError, 'disk full'):
+                export_folder(self.rows, root, '2026-11', 90000)
+        self.assertEqual(list(root.iterdir()), [old])
+        self.assertEqual((old / 'keep.pdf').read_bytes(), b'keep')
 
-    def test_print_copy_preserves_vector_text_and_original_unchanged(self):
+    def test_second_copy_failure_cleans_first_copy(self):
+        import shutil
+        root = self.directory / 'exports'
+        original_copy = shutil.copyfile
+        second = dict(self.rows[0], invoice_number='second', invoice_serial='second')
+        calls = []
+        def copy(source, destination):
+            calls.append(destination)
+            if len(calls) == 2:
+                raise OSError('disk full')
+            return original_copy(source, destination)
+        with patch('invoice_manager.invoice_files.shutil.copyfile', side_effect=copy):
+            with self.assertRaisesRegex(OSError, 'disk full'):
+                export_folder([*self.rows, second], root, '2026-11', 90000)
+        self.assertEqual(list(root.iterdir()), [])
+
+    def test_print_confirmation_uses_last_submitted_selection(self):
+        root, view = self.make_view()
+        with patch('invoice_manager.batch_view.print_command', return_value=['mock']), \
+             patch('invoice_manager.batch_view.submit_print'):
+            view.print_checked()
+            deadline = time.monotonic() + 5
+            while view.busy and time.monotonic() < deadline:
+                root.update()
+                time.sleep(0.01)
+        view.check_all(False)
+        with patch('tkinter.messagebox.askyesno', return_value=True):
+            view.mark_printed()
+        self.assertEqual(database.list_invoices()[0]['is_printed'], 1)
+
+    def test_print_copy_preserves_original_size_text_and_annotations(self):
         source = original_path(self.rows[0])
         before = hashlib.sha256(source.read_bytes()).hexdigest()
         destination = self.directory / 'print.pdf'
         prepare_print_pdf(self.rows, destination)
-        with fitz.open(destination) as document:
-            self.assertEqual(len(document), 1)
-            page = document[0]
-            self.assertAlmostEqual(page.rect.width, 210 / 25.4 * 72, places=2)
-            self.assertAlmostEqual(page.rect.height, 148 / 25.4 * 72, places=2)
-            with fitz.open(source) as original:
-                original.bake()
-                self.assertEqual(page.get_text(), original[0].get_text(clip=original[0].rect))
-                self.assertEqual(len(page.get_images()), len(original[0].get_images()))
-            self.assertTrue(page.get_text().strip())
+        with fitz.open(destination) as document, fitz.open(source) as original:
+            self.assertEqual(len(document), len(original))
+            for page, original_page in zip(document, original):
+                self.assertEqual(page.rect, original_page.rect)
+                self.assertEqual(page.mediabox, original_page.mediabox)
+                self.assertEqual(page.cropbox, original_page.cropbox)
+                self.assertEqual(page.rotation, original_page.rotation)
+                self.assertEqual(page.get_text(), original_page.get_text())
+                # Exact rendered pixels catch changed placement, annotations and colors.
+                self.assertEqual(page.get_pixmap().samples, original_page.get_pixmap().samples)
         self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), before)
         self.assertEqual(database.list_invoices()[0]['is_printed'], 0)
 
-    def test_multipage_rejected_before_submission(self):
+    def test_mixed_sizes_rotation_and_multiple_pages_are_preserved(self):
         multi = self.directory / 'multi.pdf'
         with fitz.open() as document:
-            document.new_page()
-            document.new_page()
+            first = document.new_page(width=300, height=200)
+            first.insert_text((30, 40), 'Vector text', color=(1, 0, 0))
+            first.set_cropbox(fitz.Rect(10, 10, 290, 190))
+            first.set_rotation(90)
+            first.add_text_annot((50, 60), 'Keep annotation')
+            document.new_page(width=612, height=792)
             document.save(multi)
-        with self.assertRaises(ValueError):
-            prepare_print_pdf([dict(self.rows[0], file_path=str(multi))], self.directory / 'print.pdf')
+        destination = self.directory / 'merged.pdf'
+        prepare_print_pdf([dict(self.rows[0], file_path=str(multi)), *self.rows], destination)
+        with fitz.open(multi) as original, fitz.open(destination) as document:
+            self.assertEqual(len(document), 3)
+            for index in range(2):
+                self.assertEqual(document[index].rect, original[index].rect)
+                self.assertEqual(document[index].cropbox, original[index].cropbox)
+                self.assertEqual(document[index].rotation, original[index].rotation)
+                self.assertEqual(document[index].get_pixmap().samples, original[index].get_pixmap().samples)
+            self.assertIn('Vector text', document[0].get_text())
 
-    def test_export_package_name(self):
-        rows = [dict(self.rows[0], total_amount_fen=9000)]
-        self.assertEqual(batch_export_name('2026-10', 10000, rows), '2026-10应报销：100实际报销：90差额-10.zip')
-        self.assertEqual(batch_export_name('2026-10', 9000, rows), '2026-10应报销：90实际报销：90差额0.zip')
-        self.assertEqual(batch_export_name('2026-10', 8000, rows), '2026-10应报销：80实际报销：90差额10.zip')
-        self.assertNotIn(':', batch_export_name('2026-10', 10000, rows))
+    def test_export_folder_name_and_remembered_destination(self):
+        rows = [dict(self.rows[0], total_amount_fen=89900)]
+        self.assertEqual(batch_export_name('2026-11', 90000, rows), '2026-11应报销：900实际报销：899差额-1')
+        self.assertNotIn(':', batch_export_name('2026-11', 90000, rows))
         _, view = self.make_view()
-        with patch('invoice_manager.batch_view.filedialog.asksaveasfilename', return_value='') as dialog:
+        root = self.directory / 'chosen-root'
+        with patch('invoice_manager.batch_view.filedialog.askdirectory', return_value=str(root)) as dialog:
             view.export()
-        self.assertEqual(dialog.call_args.kwargs['initialfile'], '2026-10应报销：500实际报销：428差额-72.zip')
+            dialog.assert_called_once()
+        self.assertEqual(view.last_export.parent, root)
+        with patch('invoice_manager.batch_view.filedialog.askdirectory') as dialog:
+            view.export()
+            dialog.assert_not_called()
+        self.assertTrue(view.last_export.name.endswith(' (2)'))
+        with patch('invoice_manager.app.open_document') as opener:
+            view.open_export()
+            opener.assert_called_once_with(view.last_export)
 
     def test_windows_opens_pdf_in_edge_without_rasterizing(self):
         destination = self.directory / 'print with spaces.pdf'
@@ -161,6 +221,10 @@ class OutputTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertFalse(view.busy)
             self.assertIsNone(view.pending_print)
+            dialog.assert_not_called()
+            self.assertEqual(database.list_invoices()[0]['is_printed'], 0)
+            if submit_error is None:
+                view.mark_printed()
             return dialog.called
 
     def test_print_requires_actual_success_confirmation(self):

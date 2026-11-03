@@ -29,12 +29,12 @@ def self_check(destination):
         output = temporary / 'print.pdf'
         prepare_print_pdf([{'file_path': str(source), 'invoice_number': 'self-check'}], output)
         with fitz.open(output) as document:
-            assert len(document) == 1 and document[0].rect.width > document[0].rect.height
+            assert len(document) == 1 and document[0].rect == fitz.Rect(0, 0, 595, 842)
         root = tk.Tk()
         root.withdraw()
         root.update()
         root.destroy()
-    Path(destination).write_text(json.dumps({'status': 'passed', 'checks': ['sqlite', 'tkinter', 'pypdf', 'pymupdf', 'A5 print copy'], 'data_directory': str(data_directory())}), encoding='utf-8')
+    Path(destination).write_text(json.dumps({'status': 'passed', 'checks': ['sqlite', 'tkinter', 'pypdf', 'pymupdf', 'original-size print copy'], 'data_directory': str(data_directory())}), encoding='utf-8')
 
 
 if __name__ == '__main__':

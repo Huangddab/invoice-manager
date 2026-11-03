@@ -304,7 +304,7 @@ def create_reimbursement_batch(
         for invoice_number in invoice_numbers:
             invoice = conn.execute('SELECT category, total_amount_fen FROM invoices WHERE invoice_number = ?', (invoice_number,)).fetchone()
             if invoice and expected_categories is not None and invoice[0] != expected_categories.get(invoice_number):
-                raise ValueError('发票分类已变更，请重新生成方案')
+                raise ValueError('发票分类已变更，请重新生成报销单')
             if invoice and invoice[0] == 'other':
                 other_amount += invoice[1]
             cursor = conn.execute("""

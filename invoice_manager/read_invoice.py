@@ -109,11 +109,27 @@ def parse_invoice_text(text, pdf_path):
 
 def parse_invoice(pdf_path):
     pdf_path = Path(pdf_path)
+    # Use the standard file API first so access failures have useful OS error types.
+    with pdf_path.open('rb'):
+        pass
+    import fitz
+    try:
+        with fitz.open(pdf_path) as document:
+            if document.needs_pass:
+                raise ValueError('PDF 需要密码，无法读取；请解除密码后重新导入')
+            if not len(document):
+                raise ValueError('PDF 没有页面，请检查原始文件')
+    except fitz.FileDataError:
+        # A document rejected by one parser may still be readable by the other.
+        pass
+    texts = []
     required = ("invoice_number", "total_amount", "invoice_date", "buyer", "seller")
     candidates = []
     extraction_error = None
     try:
-        candidates.append(parse_invoice_text(read_invoice_text(pdf_path), pdf_path))
+        text = read_invoice_text(pdf_path)
+        texts.append(text)
+        candidates.append(parse_invoice_text(text, pdf_path))
     except Exception as error:
         extraction_error = error
     if candidates and all(candidates[0][field] is not None and candidates[0][field] != "" for field in required):
@@ -122,11 +138,14 @@ def parse_invoice(pdf_path):
         import fitz
         with fitz.open(pdf_path) as document:
             text = "\n".join(page.get_text(sort=True) for page in document)
+        texts.append(text)
         candidates.append(parse_invoice_text(text, pdf_path))
     except Exception as error:
         extraction_error = error
     if not candidates:
         raise ValueError(f"PDF 无法读取：{extraction_error}")
+    if not any(text.strip() for text in texts):
+        raise ValueError('未提取到文字，可能是扫描件或空白文件；请检查原票，扫描件需先 OCR 后重新导入')
     # Keep fields from one coherent extraction instead of mixing invoice identities.
     return max(candidates, key=lambda row: sum(row[field] is not None and row[field] != "" for field in required))
 
@@ -135,18 +154,19 @@ def import_invoices(paths, category="meal"):
     """Validate and keep an original byte-for-byte copy before indexing."""
     if category not in ('meal', 'other'):
         raise ValueError('无效的发票分类')
-    result = {"added": 0, "duplicates": 0, "errors": []}
+    result = {"added": 0, "duplicates": 0, "errors": [], "items": []}
     for path in paths:
         path = Path(path)
         try:
             invoice = parse_invoice(path)
             invoice["category"] = category
             number = invoice["invoice_number"]
-            if not number or not re.fullmatch(r"\d{18}|\d{20}", number):
-                raise ValueError("未识别到有效发票号：数电发票需20位号码，传统发票需代码及8位号码")
+            invalid_number = not number or not re.fullmatch(r"\d{18}|\d{20}", number)
             required = ("total_amount", "invoice_date", "buyer", "seller")
             names = {"total_amount": "价税合计", "invoice_date": "开票日期", "buyer": "购买方", "seller": "销售方"}
             missing = [names[key] for key in required if invoice.get(key) is None or invoice.get(key) == ""]
+            if invalid_number:
+                missing.insert(0, '有效发票号（数电发票需20位号码，传统发票需代码及8位号码）')
             if missing:
                 raise ValueError("未识别到：" + "、".join(missing) + "；请核对 PDF 是否有可提取文字")
             directory = database.DB_PATH.parent / "managed_pdfs"
@@ -164,11 +184,22 @@ def import_invoices(paths, category="meal"):
             invoice["file_path"] = str(target.resolve())
             if save_invoice(invoice):
                 result["added"] += 1
+                result["items"].append((str(path.resolve()), "新增", "导入成功"))
             else:
                 database.relink_invoice_file(number, str(target.resolve()))
                 result["duplicates"] += 1
+                result["items"].append((str(path.resolve()), "重复", "发票已存在，未重复入库"))
         except Exception as error:
-            result["errors"].append((path.name, str(error)))
+            if isinstance(error, FileNotFoundError):
+                reason = '文件不存在或已被移动；请检查完整路径'
+            elif isinstance(error, PermissionError):
+                reason = '无法访问文件或保管目录；请检查权限和文件占用情况：' + str(error)
+            elif isinstance(error, ValueError):
+                reason = str(error)
+            else:
+                reason = f'{type(error).__name__}：{error}；请检查文件是否完整、可正常打开'
+            result["errors"].append((str(path.resolve()), reason))
+            result["items"].append((str(path.resolve()), "失败", reason))
     return result
 
 

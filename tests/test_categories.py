@@ -4,7 +4,6 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import time
-import zipfile
 import tkinter as tk
 import unittest
 from unittest.mock import patch
@@ -17,9 +16,9 @@ from invoice_manager.read_invoice import import_invoices, parse_invoice
 
 class CategoryTests(unittest.TestCase):
     def setUp(self):
-        confirmation = patch('invoice_manager.workflow_panel.messagebox.askyesno', return_value=True)
-        confirmation.start()
-        self.addCleanup(confirmation.stop)
+        errors = patch('tkinter.messagebox.showerror')
+        errors.start()
+        self.addCleanup(errors.stop)
         # Collect prior destroyed Tk roots on the UI thread before worker tests.
         gc.collect()
         self.temp = tempfile.TemporaryDirectory()
@@ -92,18 +91,6 @@ class CategoryTests(unittest.TestCase):
         rows = select_invoice_combination(database.list_invoices(), 5000)
         self.assertEqual([row['invoice_number'] for row in rows], ['meal'])
 
-    def test_cancel_proposal_popup_does_not_reserve(self):
-        self.add('meal', '49', 'meal')
-        root, app = self.app()
-        app.days.set('2')
-        app.workflow.generate()
-        with patch('invoice_manager.workflow_panel.messagebox.askyesno', return_value=False) as dialog:
-            app.workflow.confirm_proposal()
-            dialog.assert_called_once()
-        self.assertEqual(database.list_reimbursement_batches(), [])
-        self.assertEqual(database.list_invoices()[0]['status'], 'available')
-        self.assertIsNotNone(app.workflow.proposal)
-
     def test_combined_monthly_flow_and_export_target(self):
         self.add('meal', '49', 'meal')
         self.add('other', '80', 'other')
@@ -115,25 +102,21 @@ class CategoryTests(unittest.TestCase):
         app.workflow.toggle_other_panel()
         app.workflow.toggle_other_number('other')
         app.workflow.generate()
-        self.assertEqual({row['invoice_number'] for row in app.workflow.proposal[1]}, {'meal', 'other'})
-        self.assertIn('差额 ¥-1.00', app.workflow.total.get())
-        app.workflow.confirm_proposal()
+        self.assertEqual({row['invoice_number'] for row in app.workflow.batch_view.rows}, {'meal', 'other'})
+        self.assertIn('差额 ¥-1.00', app.workflow.batch_view.header.get())
         root.update()
         view = app.workflow.batch_view
         batch = database.list_reimbursement_batches()[0]
         self.assertEqual((batch['other_amount_fen'], batch['total_amount_fen']), (8000, 12900))
         self.assertEqual(app.history.tree.item(str(batch['id']), 'values')[3], '130.00')
-        with patch('invoice_manager.batch_view.filedialog.asksaveasfilename', return_value='') as dialog:
+        destination = Path(self.temp.name) / 'exports'
+        with patch('invoice_manager.batch_view.filedialog.askdirectory', return_value=str(destination)):
             view.export()
-        self.assertEqual(dialog.call_args.kwargs['initialfile'], '2026-10应报销：130实际报销：129差额-1.zip')
-        destination = str(Path(self.temp.name) / 'combined.zip')
-        with patch('invoice_manager.batch_view.filedialog.asksaveasfilename', return_value=destination):
-            view.export()
-        with zipfile.ZipFile(destination) as archive:
-            self.assertEqual(len(archive.namelist()), 2)
+        self.assertEqual(view.last_export.name, '2026-10应报销：130实际报销：129差额-1')
+        self.assertEqual(len(list(view.last_export.glob('*.pdf'))), 2)
         self.assertEqual(database.list_reimbursement_batches()[0]['status'], 'reserved')
-        view.request_finish('used')
-        view.confirm_pending()
+        with patch('tkinter.messagebox.askyesno', return_value=True):
+            view.request_finish('used')
         states = {row['invoice_number']: row['status'] for row in database.list_invoices()}
         self.assertEqual(states, {'meal': 'used', 'other': 'used', 'unselected': 'available'})
 
@@ -143,8 +126,7 @@ class CategoryTests(unittest.TestCase):
         app.days.set('0')
         app.workflow.toggle_other_number('other')
         app.workflow.generate()
-        self.assertIsNotNone(app.workflow.proposal)
-        app.workflow.confirm_proposal()
+        self.assertIsNotNone(app.workflow.batch_view)
         with patch('invoice_manager.batch_view.messagebox.askyesno', return_value=True):
             app.workflow.batch_view.request_finish('cancelled')
         self.assertEqual(database.list_reimbursement_batches(), [])
@@ -152,13 +134,16 @@ class CategoryTests(unittest.TestCase):
         self.assertEqual(database.list_invoices()[0]['category'], 'other')
         self.assertIsNone(app.workflow.batch_view)
 
-    def test_changed_category_rejects_stale_proposal(self):
+    def test_changed_category_during_creation_is_rejected(self):
         self.add('meal', '50', 'meal')
         _, app = self.app()
         app.days.set('2')
-        app.workflow.generate()
-        database.update_category_batch(['meal'], 'other')
-        app.workflow.confirm_proposal()
+        original_create = database.create_reimbursement_batch
+        def change_before_commit(*args, **kwargs):
+            database.update_category_batch(['meal'], 'other')
+            return original_create(*args, **kwargs)
+        with patch('invoice_manager.database.create_reimbursement_batch', side_effect=change_before_commit):
+            app.workflow.generate()
         self.assertEqual(database.list_reimbursement_batches(), [])
         self.assertEqual(database.list_invoices()[0]['status'], 'available')
         self.assertIn('分类已变更', app.workflow.feedback.get())

@@ -2,6 +2,7 @@
 from decimal import Decimal
 from pathlib import Path
 import queue
+import shutil
 import sys
 import tempfile
 import threading
@@ -9,8 +10,9 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from invoice_manager import database
+from invoice_manager.settings import load_settings, save_settings
 from invoice_manager.ui_widgets import checkbox_icons
-from invoice_manager.invoice_files import display_invoice_number, batch_export_name, export_zip, original_path, prepare_print_pdf, print_command, submit_print
+from invoice_manager.invoice_files import display_invoice_number, export_folder, original_path, prepare_print_pdf, print_command, submit_print
 
 
 def amount(fen):
@@ -27,6 +29,8 @@ class BatchView:
         self.window.pack(fill='both', expand=True)
         self.pending_print = None
         self.pending_action = None
+        self.last_printed_numbers = []
+        self.last_export = None
         self.header = tk.StringVar(self.window)
         self.summary = tk.StringVar(self.window)
         self.feedback = tk.StringVar(self.window, '')
@@ -36,8 +40,8 @@ class BatchView:
         ttk.Button(controls, text='全选', command=lambda: self.check_all(True)).pack(side='left')
         ttk.Button(controls, text='取消全选', command=lambda: self.check_all(False)).pack(side='left', padx=8)
         ttk.Button(controls, text='打开原 PDF', command=self.open_pdf).pack(side='left')
-        ttk.Button(controls, text='勾选 PDF 打包导出', command=self.export).pack(side='right', padx=8)
-        self.print_button = ttk.Button(controls, text='打印（A5 横向）', command=self.print_checked)
+        ttk.Button(controls, text='导出到文件夹', command=self.export).pack(side='right', padx=8)
+        self.print_button = ttk.Button(controls, text='打印 PDF', command=self.print_checked)
         self.print_button.pack(side='right')
         frame = ttk.Frame(self.window, padding=12)
         columns = ('category', 'number', 'date', 'buyer', 'seller', 'amount', 'printed', 'remark')
@@ -64,10 +68,15 @@ class BatchView:
         ttk.Label(self.window, textvariable=self.feedback, padding=(12, 4), wraplength=1000).pack(anchor='w')
         lifecycle = ttk.Frame(self.window, padding=12)
         lifecycle.pack(fill='x')
-        self.finish_button = ttk.Button(lifecycle, text='确认已报销', command=lambda: self.request_finish('used'))
+        self.finish_button = ttk.Button(lifecycle, text='完成报销', command=lambda: self.request_finish('used'))
         self.finish_button.pack(side='right', padx=6)
         self.cancel_button = ttk.Button(lifecycle, text='取消此报销单', command=lambda: self.request_finish('cancelled'))
         self.cancel_button.pack(side='right', padx=6)
+        self.mark_print_button = ttk.Button(lifecycle, text='标记已打印', command=self.mark_printed, state='disabled')
+        self.mark_print_button.pack(side='left', padx=6)
+        ttk.Button(lifecycle, text='更改导出目录', command=self.choose_export_root).pack(side='left', padx=6)
+        self.open_export_button = ttk.Button(lifecycle, text='打开导出文件夹', command=self.open_export, state='disabled')
+        self.open_export_button.pack(side='left', padx=6)
         self.reload()
         self.check_all(True)
         frame.pack(fill='both', expand=True)
@@ -134,20 +143,46 @@ class BatchView:
             self.feedback.set('请先勾选要打印或导出的发票。')
         return rows
 
+    def report_error(self, title, error):
+        self.feedback.set(f'{title}：{error}')
+        messagebox.showerror(title, str(error), parent=self.window)
+
+    def choose_export_root(self):
+        path = filedialog.askdirectory(parent=self.window, title='选择导出根目录',
+                                       initialdir=load_settings().get('export_root') or None)
+        if not path:
+            return None
+        try:
+            save_settings(export_root=path)
+        except OSError as error:
+            self.report_error('保存导出目录失败', error)
+            return None
+        self.feedback.set(f'导出目录：{path}')
+        return path
+
     def export(self):
         rows = self.require_rows()
         if not rows:
             return
-        path = filedialog.asksaveasfilename(parent=self.window, title='导出原始 PDF 压缩包', defaultextension='.zip',
-                    initialfile=batch_export_name(self.batch['reimbursement_month'], self.batch['work_days'] * self.batch['daily_allowance_fen'] + self.batch['other_amount_fen'], rows), filetypes=[('ZIP 压缩包', '*.zip')])
-        if not path:
+        root = load_settings().get('export_root') or self.choose_export_root()
+        if not root:
             return
         try:
-            count = export_zip(rows, path)
+            target = self.batch['work_days'] * self.batch['daily_allowance_fen'] + self.batch['other_amount_fen']
+            self.last_export = export_folder(rows, root, self.batch['reimbursement_month'], target)
         except (OSError, ValueError) as error:
-            self.feedback.set(f'导出失败：{error}')
+            self.report_error('导出失败', error)
             return
-        self.feedback.set(f'已导出 {count} 张 PDF：{path}')
+        self.open_export_button.configure(state='normal')
+        self.feedback.set(f'已导出 {len(rows)} 张原始 PDF：{self.last_export}')
+
+    def open_export(self):
+        if self.last_export:
+            try:
+                from invoice_manager.app import open_document
+                open_document(self.last_export)
+            except OSError as error:
+                self.report_error('无法打开文件夹', error)
 
     def open_pdf(self):
         selected = self.tree.selection()
@@ -179,14 +214,18 @@ class BatchView:
         # Edge reads asynchronously, so Windows copies must survive this view and app.
         temporary = None if sys.platform == 'win32' else tempfile.TemporaryDirectory(prefix='invoice-print-')
         directory = tempfile.mkdtemp(prefix='invoice-print-') if temporary is None else temporary.name
-        pdf = Path(directory) / 'A5-landscape.pdf'
+        pdf = Path(directory) / 'invoices-original-size.pdf'
         try:
             command = print_command(pdf)
         except OSError as error:
             if temporary is not None:
                 temporary.cleanup()
-            self.feedback.set(f'无法启动打印：{error}。请检查系统打印机及依赖安装：python -m pip install -r requirements.txt')
+            if temporary is None:
+                shutil.rmtree(directory, ignore_errors=True)
+            self.report_error('无法启动打印', error)
             return
+        self.last_printed_numbers = []
+        self.mark_print_button.configure(state='disabled')
         self.busy = True
         self.print_button.configure(state='disabled')
         self.feedback.set('正在准备打印…')
@@ -217,18 +256,30 @@ class BatchView:
             self.busy = False
             self.print_button.configure(state='normal')
             if error is not None:
-                self.feedback.set(f'打印失败：{error}。未修改打印状态。')
+                if temporary is None:
+                    shutil.rmtree(directory, ignore_errors=True)
+                self.report_error('打印失败，未修改打印状态', error)
                 return
-            self.pending_print = [row['invoice_number'] for row in rows]
+            self.last_printed_numbers = [row['invoice_number'] for row in rows]
+            self.mark_print_button.configure(state='normal')
             self.feedback.set(
-                f'已在 Edge 打开 {len(rows)} 张发票。请按 Ctrl+P，选择 A5、横向、黑白、每张一页，关闭页眉页脚；核对预览并打印。出纸后再确认。'
-                if sys.platform == 'win32' else f'本次 {len(rows)} 张是否全部出纸成功？')
-            self.show_confirmation('全部实际打印成功')
+                f'已在 Edge 打开 {len(rows)} 张原始尺寸发票。按 Ctrl+P，选择实际大小 / 100%，纸张和方向按原票设置；出纸后可点击“标记已打印”。'
+                if sys.platform == 'win32' else '已提交原始尺寸 PDF，请核对出纸后点击“标记已打印”。')
         self.window.after(100, poll)
 
 
+    def mark_printed(self):
+        if self.busy:
+            return
+        if not self.last_printed_numbers:
+            self.feedback.set('请先通过“打印 PDF”打开或提交本次发票。')
+            return
+        self.pending_print = list(self.last_printed_numbers)
+        self.feedback.set(f'本次打印的 {len(self.pending_print)} 张发票是否已全部实际出纸成功？')
+        self.show_confirmation('确认打印结果')
+
     def show_confirmation(self, label):
-        if messagebox.askyesno(label, self.feedback.get() + '\n\n' + label + '？\n选择“否”或关闭弹窗，状态不变。',
+        if messagebox.askyesno(label, self.feedback.get() + '\n\n选择“否”或关闭弹窗，状态不变。',
                                parent=self.window, default=messagebox.NO):
             self.confirm_pending()
         else:
@@ -240,39 +291,38 @@ class BatchView:
         self.feedback.set('已取消，状态未变。')
 
     def request_finish(self, action):
-        if self.busy or self.pending_print is not None:
-            self.feedback.set('请先确认打印结果。')
+        if self.busy or self.pending_print is not None or self.pending_action is not None:
+            self.feedback.set('请先完成当前操作。')
             return
-        if action == 'cancelled':
-            if messagebox.askyesno('取消报销单', '确认取消此报销单？\n将删除该单记录并释放预留发票，原件和打印状态保留。', parent=self.window, default=messagebox.NO):
-                self.pending_action = action
-                self.confirm_pending()
+        if self.batch_status != 'reserved' or action not in ('used', 'cancelled'):
             return
         self.pending_action = action
-        if action == 'used':
-            self.feedback.set('确认已报销？整单发票将标记已使用，不可重复报销。')
-            self.show_confirmation('确认整单已报销')
+        if action == 'cancelled':
+            self.feedback.set('确认取消此报销单？将删除本单记录并释放预留发票，原件和打印状态保留。')
+            self.show_confirmation('取消报销单')
         else:
-            self.feedback.set('删除本单记录并释放预留发票？')
-            self.show_confirmation('确认取消并清空记录')
+            self.feedback.set(f"确认本单已经完成报销？\n月份：{self.batch['reimbursement_month']}\n发票：{len(self.rows)} 张，实际金额：¥{amount(sum(row['total_amount_fen'] for row in self.rows))}\n整单发票将标记已使用，不可重复报销。")
+            self.show_confirmation('完成报销')
 
     def confirm_pending(self):
-        cancelled = self.pending_print is None and self.pending_action == 'cancelled'
+        action = self.pending_action
         try:
             if self.pending_print is not None:
                 database.update_printed_batch(self.pending_print, True)
                 feedback = '已标记打印成功。'
-            elif self.pending_action is not None:
-                database.finish_reimbursement_batch(self.batch_id, self.pending_action)
-                feedback = '已报销。' if self.pending_action == 'used' else '已取消，发票已释放。'
+            elif action is not None:
+                database.finish_reimbursement_batch(self.batch_id, action)
+                feedback = '报销已完成，记录已存入历史。' if action == 'used' else '已取消，发票已释放。'
             else:
                 return
         except (ValueError, database.sqlite3.Error) as error:
-            self.feedback.set(f'保存失败：{error}')
+            self.pending_print = None
+            self.pending_action = None
+            self.report_error('保存失败', error)
             return
         self.pending_print = None
         self.pending_action = None
-        if cancelled:
+        if action == 'cancelled':
             self.batch_status = 'cancelled'
             self.rows = []
             self.checked.clear()
@@ -280,9 +330,8 @@ class BatchView:
             self.render()
             self.finish_button.configure(state='disabled')
             self.cancel_button.configure(state='disabled')
-            self.feedback.set('已取消，记录已清空。')
-            self.changed()
-            return
-        self.reload()
-        self.changed()
+        else:
+            self.reload()
         self.feedback.set(feedback)
+        # The parent may destroy this view on completion; never touch it afterwards.
+        self.changed()

@@ -28,8 +28,8 @@
 
 以下规则必须保持：
 
-- 生成方案只预览；确认方案后才预留发票。
-- 改动目标或其他发票勾选后，旧方案失效，需重新生成。
+- 生成报销单即创建并预留，无独立预览确认阶段；数据库事务复核库存和分类。
+- 办理期间隐藏新单表单，完成或取消后统一复位；保存失败不清空。
 - 打印、导出、确认已报销是独立操作。
 - 命令返回成功不代表实际打印成功，必须由用户核对出纸并确认。
 - 取消未报销单据会释放预留，并删除单据及关联明细；原件、备注、打印状态保留。
@@ -80,12 +80,15 @@ DISPLAY=:99 PYTHONDONTWRITEBYTECODE=1 \
 |---|---|
 | [app.py](../app.py) | 唯一根目录源码入口，调用包内 `main()` |
 | [invoice_manager/app.py](../invoice_manager/app.py) | 主窗口、库存查询、分类导入、备注和删除操作 |
-| [workflow_panel.py](../invoice_manager/workflow_panel.py) | `MonthlyWorkflow` 方案生成及确认，`HistoryPanel` 历史列表 |
+| [workflow_panel.py](../invoice_manager/workflow_panel.py) | `MonthlyWorkflow` 创建、办理及复位，`HistoryPanel` 历史列表 |
 | [batch_view.py](../invoice_manager/batch_view.py) | 报销单清单、输出勾选、打印确认、整单完成和取消 |
 | [database.py](../invoice_manager/database.py) | SQLite 表结构、迁移、查询与事务 |
 | [read_invoice.py](../invoice_manager/read_invoice.py) | PDF 提取、字段解析、批量导入与原件保管 |
 | [invoice_selector.py](../invoice_manager/invoice_selector.py) | 以整数分为单位寻找餐补发票组合 |
-| [invoice_files.py](../invoice_manager/invoice_files.py) | PDF 定位、命名、无损 ZIP 导出、打印副本及系统打印命令 |
+| [invoice_files.py](../invoice_manager/invoice_files.py) | PDF 定位、命名、文件夹原件导出、原尺寸 PDF 合并及系统打印命令 |
+| [reimbursement.py](../invoice_manager/reimbursement.py) | 选票并调用数据库事务创建报销单 |
+| [settings.py](../invoice_manager/settings.py) | 原子保存导出目录和每日标准 |
+| [import_results.py](../invoice_manager/import_results.py) | 逐文件处理结果、失败原因、复制和重试 |
 | [runtime_paths.py](../invoice_manager/runtime_paths.py) | 源码与 EXE 模式的数据、资源路径 |
 | [ui_widgets.py](../invoice_manager/ui_widgets.py) | 24 像素勾选图标 |
 | [tools/desktop_entry.py](../tools/desktop_entry.py) | EXE 入口和隔离自检 |
@@ -109,6 +112,7 @@ DISPLAY=:99 PYTHONDONTWRITEBYTECODE=1 \
 ```text
 data-directory/
   invoices.db        # 库存和报销历史
+  settings.json      # 导出目录及每日标准，原子写入，Git 忽略
   managed_pdfs/      # 保管的原始 PDF
   invoices/          # 可选：旧版原始 PDF 位置
 ```
@@ -208,12 +212,18 @@ data-directory/
 
 ## 7. 界面与业务状态
 
-主窗口使用三个页签：本月报销、发票库存、报销历史。方案和报销单明细嵌入主窗口。备注编辑使用弹窗；方案预留、打印结果、确认报销、删除记录和取消报销单均使用弹窗二次确认，默认选择“否”，关闭弹窗不改变状态。
+主窗口使用三个页签：本月报销、发票库存、报销历史。准备和办理互斥显示：`generate()` 调用业务服务创建并预留，成功后隐藏输入。`reset()` 统一销毁当前视图、清空勾选和天数、恢复当月、保留每日标准，显示准备页面。
+
+完成/取消事务成功后才复位，失败保留单据与输入。`BatchView.changed()` 可能销毁当前控件，回调之后不得再访问该视图。创建时重复点击由活动单据守卫阻止，提交时数据库复核状态与分类。
+
+已完成历史使用独立查看窗口，不替换当前待办。其他待办不能覆盖当前办理中的单据。完成报销、取消、删除、标记已打印使用二次确认弹窗，默认“否”；生成无需确认。错误弹窗，普通成功页面提示。
+
+导入结果包含 `added`、`duplicates`、`errors` 和逐文件 `items`。失败保存完整路径及实际原因；有失败自动打开结果窗口，底部按钮可重开、复制失败明细、仅重试存在的失败文件并沿用原分类。
 
 ```mermaid
 stateDiagram-v2
     [*] --> available: 导入
-    available --> reserved: 确认报销方案
+    available --> reserved: 生成报销单
     reserved --> used: 确认整单已报销
     reserved --> available: 取消单据并删除记录
     available --> unusable: 设置不可用
@@ -233,30 +243,29 @@ stateDiagram-v2
 
 ### 打印管线
 
-1. 在临时目录生成 A5 横向 PDF，5 mm 边距、等比例完整缩放。
-2. 每张发票一页，使用 `show_pdf_page` 等比例嵌入原 PDF，保留矢量内容和颜色；多页原票拒绝自动打印并提示核对。
-3. Windows 查找 Microsoft Edge，以文件 URI 打开合并 PDF，不生成 PNG、不依赖 PowerShell 或 SumatraPDF。
-4. 用户在 Edge 按 Ctrl+P，选择 A5、横向、黑白、每张一页并核对预览；Linux/macOS 使用 CUPS `lp`。
-5. Windows 副本保留在系统临时目录的 `invoice-print-*` 中，避免 Edge 异步读取时文件已删除，关闭 Edge 后可清理。
-6. 打开 Edge 或提交命令不代表出纸；必须在“全部实际打印成功”弹窗选择“是”才更新打印状态。取消或失败时选择“否”或关闭弹窗，状态不变。
+1. 使用 `insert_pdf` 直接复制原始页面，保留 MediaBox、CropBox、旋转、内容、注释和表单。不重新排版，不转图片，不加边距，不限制原票页数。
+2. Windows 查找 Microsoft Edge，以文件 URI 异步打开 PDF，不生成 PNG、不依赖 PowerShell 或 SumatraPDF。
+3. 用户在 Edge 按 Ctrl+P，选择实际大小 / 100%，按原票选择纸张和方向。程序不自动控制 Edge 打印选项；Linux/macOS 使用 CUPS `lp -o print-scaling=none`。
+4. Windows 副本保留在系统临时目录 `invoice-print-*`，关闭 Edge 后可清理；启动失败移除本次临时目录。
+5. 打开成功后只保存本次发票号码快照，不弹出成功确认。用户出纸后主动点击“标记已打印”，弹窗确认才保存状态，不阻塞完成报销。
 
 ### 导出规则
 
-ZIP 内是原始 PDF 字节内容，不能使用排版后的打印副本代替。单文件名：
+`export_folder()` 将所选原始 PDF 复制到根目录下新建的报销文件夹，不修改原件，不生成 ZIP。文件名：
 
 ```text
 真实发票号码_销售方名称_真实金额.pdf
 ```
 
-压缩包名：
+目录名：
 
 ```text
-2026-10应报销：100实际报销：90差额-10.zip
+2026-11应报销：900实际报销：899差额-1
 ```
 
-使用全角冒号适配 Windows。包名的应报销额使用整单目标，实际额使用本次勾选的发票合计；只导出部分票时，不会自动缩小目标。公司名中的非法字符替换为下划线，小数去掉无意义尾零。
+使用全角冒号适配 Windows。应报销额使用整单目标，实际额使用本次勾选合计，差额为实际减目标。非法文件名字符替换为下划线，小数去掉无意义尾零。
 
-`export_zip()` 检查命名冲突和缺失文件，用临时 ZIP 完成后再替换目标，禁止覆盖原始 PDF。不同传统代码的票可能拥有相同真实号码；若最终文件名也相同，当前行为是报告冲突，不能静默覆盖。
+先检查全部原件与大小写不敏感的命名冲突，再以 `mkdir` 独占创建输出目录。同名目录/文件已存在时追加 ` (2)` 等编号。复制失败删除本次部分输出，不覆盖原有目录，不提示成功。`settings.json` 保存根目录，下次复用，也可重新选择。传统号码相同且最终文件名也相同时报告冲突，不能静默覆盖。
 
 ## 9. 测试与回归
 
@@ -266,11 +275,12 @@ ZIP 内是原始 PDF 字节内容，不能使用排版后的打印副本代替�
 
 | 测试文件 | 主要覆盖 |
 |---|---|
-| `test_workflow.py` | 主流程、后台导入、过期方案、状态回滚 |
+| `test_workflow.py` | 生成即预留、完成/取消复位、失败保留、历史隔离、并发复核 |
 | `test_categories.py` | 两类库存、迁移、混合报销、全选与大号勾选 |
 | `test_inventory_actions.py` | 弹窗备注、删除确认、保留原件与关联保护 |
 | `test_parsing.py` | 传统票、乱码备用提取、身份去重及金额 |
 | `test_outputs.py` | 无损导出、打印文件规格、取消/失败/成功确认、打开 PDF |
+| `test_import_results.py` | 合成 PDF 的失败分类、自动详情、复制、重试和完整路径 |
 | `test_runtime_paths.py` | 源码与冻结路径、数据覆盖目录 |
 | `test_windows_build.py` | Tcl/Tk 与 zipfs、EXE 自检、锁定旧程序时的更新 |
 
@@ -296,7 +306,7 @@ py tools/build_windows.py
 
 构建主机必须是 Windows，Linux 上不直接生成 Windows EXE。资源数据目标固定为 `_tcl_data` 和 `_tk_data`，不能只复制 Tk DLL，忽略 Tcl 脚本目录。虚拟库通过 Tcl 文件系统复制成普通文件，并保持到 PyInstaller 完成。
 
-`tools/desktop_entry.py --self-check <结果路径>` 检查 SQLite、Tk 窗口、PDF 依赖、A5 副本。冻结后由构建脚本实际启动 EXE，要求 60 秒内生成本次结果，且数据目录位于 EXE 同级，才接受产物。
+`tools/desktop_entry.py --self-check <结果路径>` 检查 SQLite、Tk 窗口、PDF 依赖、原始尺寸合并 PDF。冻结后由构建脚本实际启动 EXE，要求 60 秒内生成本次结果，且数据目录位于 EXE 同级，才接受产物。
 
 构建中间文件在 `build/verified-output/`。用户应取构建完成时打印的 `dist/` 路径，不以 PyInstaller 单独显示的“Build complete”判断最终更新成功。
 
@@ -315,14 +325,14 @@ py tools/build_windows.py
 | 构建 WinError 5 | 关闭旧 EXE 和报错窗口；新版构建会尝试另存，按最终路径取文件 |
 | 导入失败 | 查看缺失字段，区分传统票、文本乱码、扫描图片、损坏 PDF；不能以文件名补写财务金额 |
 | 打开原 PDF 无反应 | 区分勾选与行选择，检查保管副本；Windows 没有文件关联时设置默认 PDF 阅读器 |
-| 打印失败或取消 | 查看页面具体错误、系统打印机和 A5 驱动支持；不把命令提交当成实际出纸 |
+| 打印失败或取消 | 查看错误弹窗、Edge 是否安装，以及纸张、缩放和驱动设置；不把命令提交当成实际出纸 |
 | GUI 测试不能连接 `:99` | 先恢复虚拟显示器，不将零 GUI 验证当成通过 |
 
 ## 12. 修改约定
 
 - 金额保持 `Decimal` 或整数分，SQL 使用参数化查询。
 - 数据结构改动放在 `database.py`，补迁移和重复初始化测试。
-- 方案确认必须重新检查库存状态与分类，不能只信任预览缓存。
+- 创建报销单必须在事务内重新检查库存状态与分类，不能只信任选票快照。
 - 有关联数据的批量修改保持事务性，并覆盖中途失败回滚。
 - 不擅自清空数据库，不因重构移动数据目录，不将个人票据加入打包资源。
 - GUI 改动验证点击、选择和实际按钮可见性；文案保持简短，长说明留在文档。

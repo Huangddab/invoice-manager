@@ -14,6 +14,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from invoice_manager import database
 from invoice_manager.invoice_files import display_invoice_number
 from invoice_manager.read_invoice import import_invoices
+from invoice_manager.settings import load_settings
 
 CATEGORY = {"meal": "餐补", "other": "其他"}
 
@@ -72,6 +73,8 @@ class InvoiceApp:
         self.root = root
         self.rows = []
         self.importing = False
+        self.last_import_result = None
+        self.import_result_window = None
         self.results = queue.Queue()
         self.query = tk.StringVar(root)
         self.status = tk.StringVar(root, "全部")
@@ -80,8 +83,8 @@ class InvoiceApp:
         self.summary = tk.StringVar(root)
         self.selection_summary = tk.StringVar(root)
         self.month = tk.StringVar(root, date.today().strftime("%Y-%m"))
-        self.days = tk.StringVar(root, "20")
-        self.allowance = tk.StringVar(root, "25")
+        self.days = tk.StringVar(root, "")
+        self.allowance = tk.StringVar(root, str(load_settings().get("daily_allowance", "25")))
         self.feedback = tk.StringVar(root, "")
         root.title("个人发票管理")
         root.geometry("1180x720")
@@ -175,7 +178,8 @@ class InvoiceApp:
         ttk.Label(outer, textvariable=self.selection_summary).pack(anchor="w", pady=4)
         ttk.Separator(outer).pack(fill="x", pady=8)
         ttk.Label(outer, textvariable=self.feedback, wraplength=1050).pack(anchor="w")
-        self.import_errors = tk.Text(outer, height=3, wrap="word")
+        self.import_details_button = ttk.Button(outer, text='查看本次处理详情', command=self.show_import_details, state='disabled')
+        self.import_details_button.pack(anchor='w', pady=4)
         self.table.bind("<<TreeviewSelect>>", self.selection_changed)
         self.table.bind("<Double-1>", self.edit_remark)
         root.bind("<Control-f>", lambda event: search.focus_set())
@@ -244,7 +248,7 @@ class InvoiceApp:
         if not selected:
             self.feedback.set('请先选择要删除的发票。')
             return
-        if not messagebox.askyesno('删除发票记录', f'确认删除所选 {len(selected)} 张发票的数据库记录？\n原始 PDF 保留。已预留、已使用或关联报销单的发票不能删除。', parent=self.root):
+        if not messagebox.askyesno('删除发票记录', f'确认删除所选 {len(selected)} 张发票的数据库记录？\n原始 PDF 保留。已预留、已使用或关联报销单的发票不能删除。', parent=self.root, default=messagebox.NO):
             return
         try:
             count = database.delete_invoices(selected)
@@ -314,6 +318,17 @@ class InvoiceApp:
         self.workflow.refresh_other()
 
     def open_batch(self, batch_id):
+        batch = next((row for row in database.list_reimbursement_batches() if row['id'] == batch_id), None)
+        if batch is None:
+            messagebox.showerror('无法打开', '报销单已不存在，请刷新历史。', parent=self.root)
+            return
+        if batch['status'] == 'used':
+            from invoice_manager.batch_view import BatchView
+            window = tk.Toplevel(self.root)
+            window.title('已完成报销单 · 查看 / 打印 / 导出')
+            window.geometry('1180x700')
+            BatchView(window, batch_id, self.workflow_changed)
+            return
         if self.workflow.open_batch(batch_id):
             self.notebook.select(self.month_tab)
 
@@ -323,7 +338,7 @@ class InvoiceApp:
 
     def create_batch(self):
         self.notebook.select(self.month_tab)
-        self.workflow.confirm_proposal()
+        self.workflow.generate()
 
     def show_batches(self):
         self.history.reload()
@@ -336,7 +351,12 @@ class InvoiceApp:
         if not chosen:
             return
         folder = Path(chosen)
-        paths = sorted(path for path in folder.glob("*") if path.is_file() and path.suffix.lower() == ".pdf")
+        try:
+            paths = sorted(path for path in folder.iterdir() if path.is_file() and path.suffix.lower() == ".pdf")
+        except OSError as error:
+            self.feedback.set(f'扫描文件夹失败：{folder}：{error}')
+            messagebox.showerror('扫描文件夹失败', f'{folder}\n{error}', parent=self.root)
+            return
         if not paths:
             self.feedback.set("发票目录中没有 PDF，请点击「导入餐补」或「导入其他」选择文件。")
             return
@@ -364,7 +384,7 @@ class InvoiceApp:
             try:
                 self.results.put(import_invoices(paths, category))
             except Exception as error:
-                self.results.put({"added": 0, "duplicates": 0, "errors": [("导入失败", str(error))]})
+                self.results.put({"added": 0, "duplicates": 0, "errors": [(str(Path(path).resolve()), f"{type(error).__name__}：{error}") for path in paths]})
         threading.Thread(target=worker, daemon=True).start()
         self.root.after(100, self.poll_import)
 
@@ -383,13 +403,18 @@ class InvoiceApp:
         self.workflow.refresh_other()
         summary = f"{CATEGORY[self.importing_category]}导入完成：新增 {result['added']} 张，重复跳过 {result['duplicates']} 张，失败 {len(result['errors'])} 张。"
         self.feedback.set(summary)
-        self.import_errors.pack_forget()
-        if result["errors"]:
-            self.import_errors.configure(state="normal")
-            self.import_errors.delete("1.0", "end")
-            self.import_errors.insert("1.0", "\n".join(f"{name}：{error}" for name, error in result["errors"]))
-            self.import_errors.configure(state="disabled")
-            self.import_errors.pack(fill="x", pady=6)
+        self.last_import_result = dict(result, category=self.importing_category, summary=summary)
+        self.import_details_button.configure(state='normal')
+        if result['errors']:
+            self.show_import_details()
+
+    def show_import_details(self):
+        if self.last_import_result is None:
+            return
+        if self.import_result_window is not None and self.import_result_window.winfo_exists():
+            self.import_result_window.destroy()
+        from invoice_manager.import_results import ImportResultWindow
+        self.import_result_window = ImportResultWindow(self.root, self.last_import_result, self.start_import)
 
 
 def main():

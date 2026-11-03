@@ -6,8 +6,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
-import zipfile
 
 
 def original_path(invoice):
@@ -43,55 +41,57 @@ def batch_export_name(month, target_fen, invoices):
     def compact(fen):
         return format(Decimal(fen) / 100, '.2f').rstrip('0').rstrip('.')
     total = sum(row['total_amount_fen'] for row in invoices)
-    return f'{month}应报销：{compact(target_fen)}实际报销：{compact(total)}差额{compact(total-target_fen)}.zip'
+    return f'{month}应报销：{compact(target_fen)}实际报销：{compact(total)}差额{compact(total-target_fen)}'
 
 
-def export_zip(invoices, destination):
-    invoices = list(invoices)
-    if not invoices:
-        raise ValueError('请至少勾选一张发票')
-    files = [(original_path(row), export_name(row)) for row in invoices]
-    if len({name for _, name in files}) != len(files):
-        raise ValueError('导出文件名重复，请核对发票号码')
-    destination = Path(destination)
-    if any(destination.resolve() == source.resolve() for source, _ in files):
-        raise ValueError('导出位置不能覆盖原始 PDF，请选择 ZIP 文件名')
-    handle, temporary = tempfile.mkstemp(dir=destination.parent, suffix='.zip')
-    os.close(handle)
-    try:
-        with zipfile.ZipFile(temporary, 'w', zipfile.ZIP_DEFLATED) as archive:
-            for source, name in files:
-                archive.write(source, name)
-        os.replace(temporary, destination)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
-    return len(files)
-
-
-def prepare_print_pdf(invoices, destination):
-    """A5 landscape, vector-preserving, one invoice per sheet, 5 mm margins."""
-    try:
-        import fitz
-    except ImportError as error:
-        raise RuntimeError('缺少打印所需的 PyMuPDF，请在项目目录执行：python -m pip install -r requirements.txt') from error
+def export_folder(invoices, root, month, target_fen):
+    """Copy originals to a new uniquely named folder; remove incomplete exports."""
     rows = list(invoices)
     if not rows:
         raise ValueError('请至少勾选一张发票')
-    width, height = 210 / 25.4 * 72, 148 / 25.4 * 72
-    margin = 5 / 25.4 * 72
+    files = [(original_path(row), export_name(row)) for row in rows]
+    if len({name.casefold() for _, name in files}) != len(files):
+        raise ValueError('导出文件名重复，请核对发票号码')
+    if not re.fullmatch(r'\d{4}-\d{2}', month):
+        raise ValueError('无效的报销月份')
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    name = batch_export_name(month, target_fen, rows)
+    index = 1
+    while True:
+        destination = root / (name if index == 1 else f'{name} ({index})')
+        try:
+            destination.mkdir()
+            break
+        except FileExistsError:
+            index += 1
+    try:
+        for source, filename in files:
+            shutil.copyfile(source, destination / filename)
+    except Exception as error:
+        try:
+            shutil.rmtree(destination)
+        except OSError as cleanup_error:
+            raise OSError(f'复制失败：{error}；未能清理 {destination}：{cleanup_error}，请手动删除未完成的目录') from error
+        raise
+    return destination
+
+
+def prepare_print_pdf(invoices, destination):
+    """Merge original PDF pages without changing boxes, rotation, content or annotations."""
+    try:
+        import fitz
+    except ImportError as error:
+        raise RuntimeError('缺少 PyMuPDF，请安装项目依赖') from error
+    rows = list(invoices)
+    if not rows:
+        raise ValueError('请至少勾选一张发票')
     with fitz.open() as output:
         for row in rows:
             with fitz.open(original_path(row)) as source:
-                if len(source) != 1:
-                    raise ValueError(f"发票 {row['invoice_number']} 有 {len(source)} 页，请人工核对；未发送打印")
-                # Flatten stamps / annotations as PDF content, without rasterizing.
-                source.bake()
-                page = source[0]
-                target = output.new_page(width=width, height=height)
-                if not page.get_contents():
-                    continue
-                target.show_pdf_page(fitz.Rect(margin, margin, width - margin, height - margin), source, 0,
-                                     keep_proportion=True)
+                if source.needs_pass:
+                    raise ValueError(f"发票 {row['invoice_number']} 的 PDF 需要密码")
+                output.insert_pdf(source, annots=True, widgets=True)
         output.save(destination, deflate=True)
 
 
@@ -114,8 +114,7 @@ def print_command(pdf):
     executable = shutil.which('lp')
     if not executable:
         raise FileNotFoundError('未找到系统打印命令 lp，请配置打印机后重试')
-    return [executable, '-o', 'media=A5', '-o', 'orientation-requested=4', '-o', 'print-color-mode=monochrome',
-            '-o', 'fit-to-page', '-o', 'number-up=1', str(pdf)]
+    return [executable, '-o', 'print-scaling=none', '-o', 'number-up=1', str(pdf)]
 
 
 def submit_print(command):

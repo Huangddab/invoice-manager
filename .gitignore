@@ -26,3 +26,6 @@ exports/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local preferences
+settings.json
