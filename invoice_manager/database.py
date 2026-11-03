@@ -417,12 +417,22 @@ def delete_invoices(invoice_numbers):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute('PRAGMA foreign_keys = ON')
         conn.execute('BEGIN IMMEDIATE')
+        blocked = []
+        labels = {'reserved': '已预留', 'used': '已使用'}
         for number in numbers:
             row = conn.execute('SELECT status FROM invoices WHERE invoice_number = ?', (number,)).fetchone()
             if not row:
-                raise ValueError('部分发票已不存在，请刷新后重试')
+                raise ValueError('部分发票已不存在，本次未删除任何记录；请刷新后重试')
             linked = conn.execute('SELECT 1 FROM reimbursement_items WHERE invoice_number = ?', (number,)).fetchone()
             if row[0] in ('reserved', 'used') or linked:
-                raise ValueError('不能删除已预留、已使用或关联报销单的发票；未报销的请先取消报销单')
-            conn.execute('DELETE FROM invoices WHERE invoice_number = ?', (number,))
+                blocked.append(f"{number}：{labels.get(row[0], '关联报销单')}")
+        if blocked:
+            details = '\n'.join(blocked[:10])
+            if len(blocked) > 10:
+                details += f'\n另有 {len(blocked) - 10} 张受保护发票。'
+            raise ValueError(f'所选 {len(numbers)} 张中有 {len(blocked)} 张已预留、已使用或关联报销单。'
+                             f'\n本次未删除任何记录。\n\n{details}\n\n'
+                             '未报销的请先取消对应报销单；已报销记录需要保留。'
+                             '也可先按使用状态筛选“待使用”或“不可用”，再选择删除。')
+        conn.executemany('DELETE FROM invoices WHERE invoice_number = ?', [(number,) for number in numbers])
     return len(numbers)

@@ -254,6 +254,7 @@ class InvoiceApp:
             count = database.delete_invoices(selected)
         except (ValueError, sqlite3.Error) as error:
             self.feedback.set(f'删除失败：{error}')
+            messagebox.showerror('删除失败，本次未删除任何记录', str(error), parent=self.root)
             return
         self.workflow.inputs_changed()
         self.workflow_changed()

@@ -67,6 +67,29 @@ class InventoryActionTests(unittest.TestCase):
         self.assertTrue(Path(self.row['file_path']).is_file())
         self.assertEqual(import_invoices([self.pdf])['added'], 1)
 
+    def test_mixed_bulk_delete_reports_blockers_and_preserves_all_records(self):
+        from invoice_manager.read_invoice import parse_invoice
+        invoice = parse_invoice(self.pdf)
+        invoice['invoice_number'] = '26000000000000000002'
+        database.save_invoice(invoice)
+        database.create_reimbursement_batch('2026-11', 20, 2500, [self.number])
+        root, app = self.app()
+        app.select_all()
+        with patch('invoice_manager.app.messagebox.askyesno', return_value=True), \
+             patch('invoice_manager.app.messagebox.showerror') as error:
+            app.delete_selected()
+        error.assert_called_once()
+        self.assertIn('本次未删除任何记录', error.call_args.args[1])
+        self.assertIn(self.number, error.call_args.args[1])
+        self.assertIn('已预留', error.call_args.args[1])
+        self.assertEqual(len(database.list_invoices()), 2)
+        # Deleting only the eligible selection really removes its database row.
+        app.status.set('待使用')
+        app.select_all()
+        with patch('invoice_manager.app.messagebox.askyesno', return_value=True):
+            app.delete_selected()
+        self.assertEqual([row['invoice_number'] for row in database.list_invoices()], [self.number])
+
     def test_linked_invoice_deletion_is_blocked(self):
         batch = database.create_reimbursement_batch('2026-10', 20, 2500, [self.number])
         with self.assertRaises(ValueError):
