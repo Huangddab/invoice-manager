@@ -24,6 +24,7 @@ class InventoryActionTests(unittest.TestCase):
 
     def tearDown(self):
         database.DB_PATH = self.old_db
+        gc.collect()
         self.temp.cleanup()
 
     def app(self):
@@ -33,6 +34,17 @@ class InventoryActionTests(unittest.TestCase):
         app.notebook.select(app.stock_tab)
         root.update()
         return root, app
+
+    def test_inventory_can_set_both_print_states(self):
+        _, app = self.app()
+        app.table.selection_set(self.number)
+        app.selection_changed()
+        app.batch_buttons[0].invoke()
+        self.assertEqual(database.list_invoices()[0]['is_printed'], 1)
+        app.table.selection_set(self.number)
+        app.selection_changed()
+        app.batch_buttons[1].invoke()
+        self.assertEqual(database.list_invoices()[0]['is_printed'], 0)
 
     def test_double_click_remark_save_cancel_and_clear(self):
         root, app = self.app()

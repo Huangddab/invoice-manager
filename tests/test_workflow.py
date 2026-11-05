@@ -11,9 +11,37 @@ from unittest.mock import patch
 from invoice_manager import database
 from invoice_manager.app import InvoiceApp, filter_invoices, reimbursement_inputs
 from invoice_manager.read_invoice import import_invoices
+from invoice_manager.workdays import previous_month, workdays_in_month
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_official_workdays_include_makeup_weekends(self):
+        self.assertEqual(workdays_in_month('2026-02'), 16)
+        self.assertEqual(workdays_in_month('2026-10'), 18)
+        self.assertEqual(workdays_in_month('2025-01'), 19)
+        self.assertIsNone(workdays_in_month('2027-01'))
+
+    def test_previous_month_crosses_year_boundary(self):
+        from datetime import date
+        self.assertEqual(previous_month(date(2026, 11, 3)), '2026-10')
+        self.assertEqual(previous_month(date(2026, 1, 1)), '2025-12')
+
+    def test_future_holiday_schedule_can_be_loaded_locally(self):
+        import json
+        from datetime import date
+        path = Path(self.temp.name) / 'holiday-schedules.json'
+        self.assertIsNone(workdays_in_month('2027-01'))
+        path.write_text(json.dumps({'2027': {
+            'holidays': [['01-01', '01-03']], 'work_weekends': ['01-09', '01-10']
+        }}), encoding='utf-8')
+        baseline = sum(date(2027, 1, day).weekday() < 5 for day in range(1, 32))
+        self.assertEqual(workdays_in_month('2027-01'), baseline + 1)
+        path.write_text(json.dumps({'2027': {
+            'holidays': [['01-01', '01-03']], 'work_weekends': ['01-04']
+        }}), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '调休上班日'):
+            workdays_in_month('2027-01')
+
     def setUp(self):
         errors = patch('tkinter.messagebox.showerror')
         errors.start()
@@ -28,6 +56,7 @@ class WorkflowTests(unittest.TestCase):
 
     def tearDown(self):
         database.DB_PATH = self.original
+        gc.collect()
         self.temp.cleanup()
 
     def test_mixed_import_and_repeat(self):
@@ -146,6 +175,16 @@ class WorkflowTests(unittest.TestCase):
         app.days.set('20')
         return root, app
 
+    def test_month_change_fills_workdays_and_allows_manual_adjustment(self):
+        _, app = self.make_app()
+        app.month.set('2026-02')
+        self.assertEqual(app.days.get(), '16')
+        app.days.set('14')
+        self.assertEqual(app.days.get(), '14')
+        app.month.set('2027-01')
+        self.assertEqual(app.days.get(), '')
+        self.assertIn('手动填写', app.workflow.days_hint.get())
+
     def test_generate_reserves_immediately_and_repeated_click_does_not_duplicate(self):
         import_invoices(self.pdfs)
         root, app = self.make_app()
@@ -201,8 +240,9 @@ class WorkflowTests(unittest.TestCase):
             view.request_finish('used')
         root.update()
         self.assertIsNone(app.workflow.batch_view)
-        self.assertEqual(app.days.get(), '')
-        self.assertEqual(app.month.get(), date.today().strftime('%Y-%m'))
+        expected_days = workdays_in_month(previous_month())
+        self.assertEqual(app.days.get(), '' if expected_days is None else str(expected_days))
+        self.assertEqual(app.month.get(), previous_month())
         self.assertEqual(app.allowance.get(), '30')
         self.assertEqual(app.workflow.other_checked, set())
         self.assertFalse(app.workflow.other_frame.winfo_ismapped())
@@ -243,7 +283,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(database.reimbursement_invoices(view.batch_id), [])
         row = database.list_invoices()[0]
         self.assertEqual((row['status'], row['is_printed']), ('available', 1))
-        self.assertEqual(app.days.get(), '')
+        expected_days = workdays_in_month(previous_month())
+        self.assertEqual(app.days.get(), '' if expected_days is None else str(expected_days))
         app.days.set('20')
         app.workflow.generate()
         self.assertIsNotNone(app.workflow.batch_view)

@@ -29,16 +29,16 @@ class BatchView:
         self.window.pack(fill='both', expand=True)
         self.pending_print = None
         self.pending_action = None
-        self.last_printed_numbers = []
         self.last_export = None
         self.header = tk.StringVar(self.window)
         self.summary = tk.StringVar(self.window)
         self.feedback = tk.StringVar(self.window, '')
-        ttk.Label(self.window, textvariable=self.header, padding=12, font=('', 13, 'bold')).pack(anchor='w')
+        ttk.Label(self.window, textvariable=self.header, padding=(12, 10), wraplength=850, style='Section.TLabel').pack(anchor='w')
         controls = ttk.Frame(self.window, padding=(12, 0))
         controls.pack(fill='x')
         ttk.Button(controls, text='全选', command=lambda: self.check_all(True)).pack(side='left')
         ttk.Button(controls, text='取消全选', command=lambda: self.check_all(False)).pack(side='left', padx=8)
+        ttk.Button(controls, text='只选未打印', command=self.check_unprinted).pack(side='left', padx=(0, 8))
         ttk.Button(controls, text='打开原 PDF', command=self.open_pdf).pack(side='left')
         ttk.Button(controls, text='导出到文件夹', command=self.export).pack(side='right', padx=8)
         self.print_button = ttk.Button(controls, text='打印 PDF', command=self.print_checked)
@@ -65,20 +65,18 @@ class BatchView:
         self.tree.bind('<space>', self.toggle_keyboard)
         self.tree.bind('<Double-1>', self.open_row)
         ttk.Label(self.window, textvariable=self.summary, padding=(12, 4)).pack(anchor='w')
-        ttk.Label(self.window, textvariable=self.feedback, padding=(12, 4), wraplength=1000).pack(anchor='w')
+        ttk.Label(self.window, textvariable=self.feedback, padding=(12, 4), wraplength=850).pack(anchor='w')
         lifecycle = ttk.Frame(self.window, padding=12)
         lifecycle.pack(fill='x')
         self.finish_button = ttk.Button(lifecycle, text='完成报销', command=lambda: self.request_finish('used'))
         self.finish_button.pack(side='right', padx=6)
         self.cancel_button = ttk.Button(lifecycle, text='取消此报销单', command=lambda: self.request_finish('cancelled'))
         self.cancel_button.pack(side='right', padx=6)
-        self.mark_print_button = ttk.Button(lifecycle, text='标记已打印', command=self.mark_printed, state='disabled')
-        self.mark_print_button.pack(side='left', padx=6)
         ttk.Button(lifecycle, text='更改导出目录', command=self.choose_export_root).pack(side='left', padx=6)
         self.open_export_button = ttk.Button(lifecycle, text='打开导出文件夹', command=self.open_export, state='disabled')
         self.open_export_button.pack(side='left', padx=6)
         self.reload()
-        self.check_all(True)
+        self.check_unprinted()
         frame.pack(fill='both', expand=True)
 
     def reload(self):
@@ -87,10 +85,10 @@ class BatchView:
         self.batch = batch
         self.batch_status = batch['status']
         self.rows = database.reimbursement_invoices(self.batch_id)
-        target = batch['work_days'] * batch['daily_allowance_fen'] + batch['other_amount_fen']
+        target = batch['target_amount_fen']
         total = sum(row['total_amount_fen'] for row in self.rows)
         state = {'reserved': '待报销（已预留）', 'used': '已报销', 'cancelled': '已取消'}[batch['status']]
-        self.header.set(f"{batch['reimbursement_month']} · {state} · 目标 ¥{amount(target)} / 实际 ¥{amount(total)} / 差额 ¥{amount(total-target)}")
+        self.header.set(f"{batch['reimbursement_month']} · {batch['buyer'] or '购买方未记录'} · {state} · 目标 ¥{amount(target)} / 实际 ¥{amount(total)} / 差额 ¥{amount(total-target)}")
         for button in (self.finish_button, self.cancel_button):
             button.configure(state='normal' if self.batch_status == 'reserved' else 'disabled')
         self.render()
@@ -114,6 +112,10 @@ class BatchView:
 
     def check_all(self, value):
         self.checked = {row['invoice_number'] for row in self.rows} if value else set()
+        self.render()
+
+    def check_unprinted(self):
+        self.checked = {row['invoice_number'] for row in self.rows if not row['is_printed']}
         self.render()
 
     def toggle_number(self, number):
@@ -168,7 +170,7 @@ class BatchView:
         if not root:
             return
         try:
-            target = self.batch['work_days'] * self.batch['daily_allowance_fen'] + self.batch['other_amount_fen']
+            target = self.batch['target_amount_fen']
             self.last_export = export_folder(rows, root, self.batch['reimbursement_month'], target)
         except (OSError, ValueError) as error:
             self.report_error('导出失败', error)
@@ -224,8 +226,6 @@ class BatchView:
                 shutil.rmtree(directory, ignore_errors=True)
             self.report_error('无法启动打印', error)
             return
-        self.last_printed_numbers = []
-        self.mark_print_button.configure(state='disabled')
         self.busy = True
         self.print_button.configure(state='disabled')
         self.feedback.set('正在准备打印…')
@@ -260,22 +260,15 @@ class BatchView:
                     shutil.rmtree(directory, ignore_errors=True)
                 self.report_error('打印失败，未修改打印状态', error)
                 return
-            self.last_printed_numbers = [row['invoice_number'] for row in rows]
-            self.mark_print_button.configure(state='normal')
-            self.feedback.set(
-                f'已在 Edge 打开 {len(rows)} 张原始尺寸发票。按 Ctrl+P，选择实际大小 / 100%，纸张和方向按原票设置；出纸后可点击“标记已打印”。'
-                if sys.platform == 'win32' else '已提交原始尺寸 PDF，请核对出纸后点击“标记已打印”。')
+            self.confirm_print_result([row['invoice_number'] for row in rows])
         self.window.after(100, poll)
 
 
-    def mark_printed(self):
-        if self.busy:
-            return
-        if not self.last_printed_numbers:
-            self.feedback.set('请先通过“打印 PDF”打开或提交本次发票。')
-            return
-        self.pending_print = list(self.last_printed_numbers)
-        self.feedback.set(f'本次打印的 {len(self.pending_print)} 张发票是否已全部实际出纸成功？')
+    def confirm_print_result(self, numbers):
+        self.pending_print = list(numbers)
+        instruction = '如使用 Edge，请先按 Ctrl+P，选择实际大小 / 100%，并核对纸张与方向。\n' if sys.platform == 'win32' else ''
+        self.feedback.set(f'{instruction}本次打印的 {len(self.pending_print)} 张发票是否已全部实际出纸成功？确认后选择“是”。')
+        self.window.winfo_toplevel().lift()
         self.show_confirmation('确认打印结果')
 
     def show_confirmation(self, label):
@@ -309,6 +302,7 @@ class BatchView:
         try:
             if self.pending_print is not None:
                 database.update_printed_batch(self.pending_print, True)
+                self.checked.difference_update(self.pending_print)
                 feedback = '已标记打印成功。'
             elif action is not None:
                 database.finish_reimbursement_batch(self.batch_id, action)

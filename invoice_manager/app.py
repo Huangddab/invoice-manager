@@ -6,7 +6,7 @@ import queue
 import sqlite3
 import threading
 import tkinter as tk
-from datetime import date, datetime
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -16,6 +16,7 @@ from invoice_manager.invoice_files import display_invoice_number
 from invoice_manager.read_invoice import import_invoices
 from invoice_manager.settings import load_settings, save_settings
 from invoice_manager.folder_sync import FolderSync, fingerprint, scan_directories
+from invoice_manager.workdays import previous_month
 
 CATEGORY = {"meal": "餐补", "other": "其他"}
 
@@ -38,12 +39,13 @@ def money(fen):
     return f"{Decimal(fen) / 100:,.2f}"
 
 
-def filter_invoices(invoices, query="", status="全部", printed="全部", category="全部"):
+def filter_invoices(invoices, query="", status="全部", printed="全部", category="全部", buyer="全部"):
     query = query.strip().casefold()
     return [row for row in invoices
             if (not query or query in " ".join(str(row.get(key, "")) for key in
                 ("invoice_number", "invoice_serial", "invoice_code", "seller", "buyer", "remark")).casefold())
             and (category == "全部" or CATEGORY.get(row.get("category", "meal")) == category)
+            and (buyer == "全部" or row.get("buyer") == buyer)
             and (status == "全部" or STATUS.get(row["status"]) == status)
             and (printed == "全部" or bool(row["is_printed"]) == (printed == "已打印"))]
 
@@ -69,9 +71,25 @@ def reimbursement_inputs(month, days_text, allowance_text):
     return month, int(days), int(allowance * 100)
 
 
+def reimbursement_target(text):
+    if not text.strip():
+        return None
+    try:
+        amount = Decimal(text.strip())
+        if not amount.is_finite() or amount < 0 or amount * 100 != (amount * 100).to_integral_value():
+            raise ValueError()
+        if amount * 100 > 9223372036854775807:
+            raise ValueError()
+    except (InvalidOperation, ValueError):
+        raise ValueError('直接输入金额需为非负数，且最多两位小数')
+    return int(amount * 100)
+
+
 class InvoiceApp:
     def __init__(self, root):
         self.root = root
+        self._timers = set()
+        root.bind('<Destroy>', self._on_destroy, add='+')
         self.rows = []
         self.importing = False
         self.last_import_result = None
@@ -89,19 +107,25 @@ class InvoiceApp:
         self.status = tk.StringVar(root, "全部")
         self.printed = tk.StringVar(root, "全部")
         self.category = tk.StringVar(root, "全部")
+        self.buyer_filter = tk.StringVar(root, "全部")
         self.summary = tk.StringVar(root)
         self.selection_summary = tk.StringVar(root)
-        self.month = tk.StringVar(root, date.today().strftime("%Y-%m"))
+        self.month = tk.StringVar(root, previous_month())
         self.days = tk.StringVar(root, "")
-        self.allowance = tk.StringVar(root, str(load_settings().get("daily_allowance", "25")))
+        self.allowance = tk.StringVar(root, str(settings.get("daily_allowance", "25")))
         self.feedback = tk.StringVar(root, "")
         root.title("个人发票管理")
         root.geometry("1180x720")
         root.minsize(900, 560)
         style = ttk.Style(root)
         style.configure("Treeview", rowheight=32)
+        style.configure("TNotebook.Tab", padding=(18, 8))
+        style.configure("TButton", padding=(8, 4))
+        style.configure("TMenubutton", padding=(8, 4))
         style.configure("Title.TLabel", font=("", 20, "bold"))
         style.configure("Summary.TLabel", font=("", 12))
+        style.configure("Section.TLabel", font=("", 12, "bold"))
+        style.configure("Muted.TLabel", foreground="#596579")
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill="both", expand=True)
         self.month_tab = ttk.Frame(self.notebook)
@@ -131,29 +155,38 @@ class InvoiceApp:
         scan_button.pack(side="right", padx=4)
         self.import_controls.extend([self.import_button, self.other_import_button, scan_button])
         ttk.Button(header, text="刷新", command=self.refresh).pack(side="right", padx=8)
-        ttk.Label(outer, textvariable=self.summary, style="Summary.TLabel").pack(anchor="w", pady=(0, 16))
+        ttk.Label(outer, textvariable=self.summary, style="Summary.TLabel").pack(anchor="w", pady=(4, 12))
         sync_bar = ttk.Frame(outer)
         sync_bar.pack(fill='x', pady=(0, 8))
         ttk.Checkbutton(sync_bar, text='自动同步扫描目录', variable=self.auto_sync, command=self.toggle_sync).pack(side='left')
         ttk.Button(sync_bar, text='同步目录设置', command=self.show_sync_folders).pack(side='left', padx=8)
-        ttk.Label(sync_bar, textvariable=self.sync_status, wraplength=650).pack(side='left')
+        ttk.Label(sync_bar, textvariable=self.sync_status, style="Muted.TLabel", wraplength=540).pack(side='left', padx=(8, 0))
         filters = ttk.Frame(outer)
-        filters.pack(fill="x", pady=(0, 12))
-        ttk.Label(filters, text="搜索").pack(side="left")
-        search = ttk.Entry(filters, textvariable=self.query, width=32)
-        search.pack(side="left", padx=(8, 16))
+        filters.pack(fill="x", pady=(0, 10))
+        search_row = ttk.Frame(filters)
+        search_row.pack(fill="x", pady=(0, 6))
+        ttk.Label(search_row, text="搜索").pack(side="left")
+        search = ttk.Entry(search_row, textvariable=self.query, width=32)
+        search.pack(side="left", fill="x", expand=True, padx=(8, 12))
+        ttk.Button(search_row, text="重置筛选", command=self.reset_filters).pack(side="right")
+        filter_row = ttk.Frame(filters)
+        filter_row.pack(fill="x")
         for label, variable, values in (("分类", self.category, ["全部", *CATEGORY.values()]), ("使用状态", self.status, ["全部", *STATUS.values()]),
                                         ("打印状态", self.printed, ["全部", "未打印", "已打印"])):
-            ttk.Label(filters, text=label).pack(side="left")
-            ttk.Combobox(filters, textvariable=variable, values=values, state="readonly", width=9).pack(side="left", padx=8)
-        ttk.Button(filters, text="重置筛选", command=self.reset_filters).pack(side="right")
+            ttk.Label(filter_row, text=label).pack(side="left")
+            ttk.Combobox(filter_row, textvariable=variable, values=values, state="readonly", width=11).pack(side="left", padx=(6, 20))
+        ttk.Label(filter_row, text="购买方").pack(side="left")
+        self.buyer_filter_combo = ttk.Combobox(filter_row, textvariable=self.buyer_filter, values=["全部"], state="readonly", width=25)
+        self.buyer_filter_combo.pack(side="left", padx=(6, 0))
+        footer = ttk.Frame(outer)
+        footer.pack(side="bottom", fill="x", pady=(8, 0))
         frame = ttk.Frame(outer)
         frame.pack(fill="both", expand=True)
-        columns = ("number", "category", "date", "seller", "amount", "printed", "status", "remark")
+        columns = ("number", "category", "date", "buyer", "seller", "amount", "printed", "status", "remark")
         self.table = ttk.Treeview(frame, columns=columns, show="headings", selectmode="extended")
         for key, title, width in zip(columns,
-                ("发票号码", "分类", "开票日期", "商家名称", "金额（元）", "打印状态", "使用状态", "备注"),
-                (180, 65, 100, 210, 100, 85, 85, 190)):
+                ("发票号码", "分类", "开票日期", "购买方公司", "商家名称", "金额（元）", "打印状态", "使用状态", "备注"),
+                (180, 65, 100, 210, 210, 100, 85, 85, 190)):
             self.table.heading(key, text=title)
             self.table.column(key, width=width, minwidth=75, anchor="e" if key == "amount" else "w")
         vertical = ttk.Scrollbar(frame, orient="vertical", command=self.table.yview)
@@ -164,21 +197,22 @@ class InvoiceApp:
         horizontal.grid(row=1, column=0, sticky="ew")
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
-        self.empty = ttk.Label(outer, text="")
-        self.empty.pack(anchor="w", pady=6)
-        category_actions = ttk.Frame(outer)
-        category_actions.pack(fill="x", pady=4)
+        self.empty = ttk.Label(footer, text="", style="Muted.TLabel")
+        self.empty.pack(anchor="w")
+        ttk.Separator(footer).pack(fill="x", pady=(6, 8))
+        category_actions = ttk.Frame(footer)
+        category_actions.pack(fill="x", pady=(0, 6))
         ttk.Label(category_actions, text="所选分类：").pack(side="left")
         for code, label in CATEGORY.items():
             ttk.Button(category_actions, text=f"移至{label}", command=lambda value=code: self.move_category(value)).pack(side="left", padx=4)
-        actions = ttk.Frame(outer)
-        actions.pack(fill="x", pady=8)
+        actions = ttk.Frame(footer)
+        actions.pack(fill="x")
         self.delete_button = ttk.Button(actions, text="删除记录", command=self.delete_selected)
         self.delete_button.pack(side="left", padx=6)
         self.open_button = ttk.Button(actions, text="打开原 PDF", command=self.open_pdf)
         self.open_button.pack(side="left", padx=6)
         self.batch_buttons = []
-        for text, printed in (("重置为未打印", False),):
+        for text, printed in (("标记已打印", True), ("标记未打印", False)):
             button = ttk.Button(actions, text=text, command=lambda value=printed: self.mark_printed(value))
             button.pack(side="left", padx=6)
             self.batch_buttons.append(button)
@@ -189,35 +223,55 @@ class InvoiceApp:
         self.status_menu.configure(menu=menu)
         self.status_menu.pack(side="left", padx=6)
         ttk.Button(actions, text="全选当前列表", command=self.select_all).pack(side="right")
-        ttk.Label(outer, textvariable=self.selection_summary).pack(anchor="w", pady=4)
-        ttk.Separator(outer).pack(fill="x", pady=8)
-        ttk.Label(outer, textvariable=self.feedback, wraplength=1050).pack(anchor="w")
-        self.import_details_button = ttk.Button(outer, text='查看本次处理详情', command=self.show_import_details, state='disabled')
-        self.import_details_button.pack(anchor='w', pady=4)
+        status_row = ttk.Frame(footer)
+        status_row.pack(fill="x", pady=(8, 0))
+        ttk.Label(status_row, textvariable=self.selection_summary, style="Muted.TLabel").pack(side="left")
+        self.import_details_button = ttk.Button(status_row, text='查看本次处理详情', command=self.show_import_details, state='disabled')
+        self.import_details_button.pack(side='right')
+        ttk.Label(footer, textvariable=self.feedback, wraplength=900).pack(anchor="w", pady=(4, 0))
         self.table.bind("<<TreeviewSelect>>", self.selection_changed)
         self.table.bind("<Double-1>", self.edit_remark)
         root.bind("<Control-f>", lambda event: search.focus_set())
         root.bind("<F5>", lambda event: self.refresh())
-        for variable in (self.query, self.status, self.printed, self.category):
+        for variable in (self.query, self.status, self.printed, self.category, self.buyer_filter):
             variable.trace_add("write", lambda *args: self.render())
         self.refresh()
         self.update_sync_status()
-        self.root.after(1000, self.check_sync)
+        self._schedule(1000, self.check_sync)
+
+    def _schedule(self, delay, callback):
+        def run():
+            self._timers.discard(timer_id)
+            if self.root.winfo_exists():
+                callback()
+        timer_id = self.root.after(delay, run)
+        self._timers.add(timer_id)
+
+    def _on_destroy(self, event):
+        if event.widget is not self.root:
+            return
+        for timer_id in self._timers:
+            self.root.after_cancel(timer_id)
+        self._timers.clear()
 
     def refresh(self):
         try:
             self.rows = database.list_invoices()
+            buyer_values = ["全部", *sorted({row['buyer'] for row in self.rows})]
+            self.buyer_filter_combo.configure(values=buyer_values)
+            if self.buyer_filter.get() not in buyer_values:
+                self.buyer_filter.set("全部")
             self.render()
         except sqlite3.Error as error:
             self.feedback.set(f"无法读取发票：{error}")
 
     def render(self):
         selected = set(self.table.selection())
-        self.visible = filter_invoices(self.rows, self.query.get(), self.status.get(), self.printed.get(), self.category.get())
+        self.visible = filter_invoices(self.rows, self.query.get(), self.status.get(), self.printed.get(), self.category.get(), self.buyer_filter.get())
         self.table.delete(*self.table.get_children())
         for row in self.visible:
             self.table.insert("", "end", iid=row["invoice_number"], values=(
-                display_invoice_number(row), CATEGORY[row["category"]], row["invoice_date"], row["seller"], money(row["total_amount_fen"]),
+                display_invoice_number(row), CATEGORY[row["category"]], row["invoice_date"], row["buyer"], row["seller"], money(row["total_amount_fen"]),
                 "已打印" if row["is_printed"] else "未打印", STATUS.get(row["status"], row["status"]), row["remark"]))
         self.table.selection_set([row["invoice_number"] for row in self.visible if row["invoice_number"] in selected])
         self.summary.set(f"全部 {len(self.rows)} 张  ·  当前显示 {len(self.visible)} 张  ·  当前金额 ¥ {money(sum(r['total_amount_fen'] for r in self.visible))}")
@@ -230,6 +284,7 @@ class InvoiceApp:
         self.status.set("全部")
         self.printed.set("全部")
         self.category.set("全部")
+        self.buyer_filter.set("全部")
 
     def select_all(self):
         self.table.selection_set(self.table.get_children())
@@ -349,14 +404,6 @@ class InvoiceApp:
         if self.workflow.open_batch(batch_id):
             self.notebook.select(self.month_tab)
 
-    def recommend(self):
-        self.notebook.select(self.month_tab)
-        self.workflow.generate()
-
-    def create_batch(self):
-        self.notebook.select(self.month_tab)
-        self.workflow.generate()
-
     def show_batches(self):
         self.history.reload()
         self.notebook.select(self.history_tab)
@@ -440,13 +487,13 @@ class InvoiceApp:
             except Exception as error:
                 self.results.put({"added": 0, "duplicates": 0, "errors": [(str(Path(path).resolve()), f"{type(error).__name__}：{error}") for path in paths]})
         threading.Thread(target=worker, daemon=True).start()
-        self.root.after(100, self.poll_import)
+        self._schedule(100, self.poll_import)
 
     def poll_import(self):
         try:
             result = self.results.get_nowait()
         except queue.Empty:
-            self.root.after(100, self.poll_import)
+            self._schedule(100, self.poll_import)
             return
         self.importing = False
         for control in self.import_controls:
@@ -472,7 +519,7 @@ class InvoiceApp:
         if result['errors']:
             self.show_import_details()
         if self.sync_pending:
-            self.root.after(0, self.import_next_sync)
+            self._schedule(0, self.import_next_sync)
 
     def update_sync_status(self):
         if not self.auto_sync.get():
@@ -520,7 +567,7 @@ class InvoiceApp:
         ttk.Button(window, text='关闭', command=window.destroy).pack(pady=8)
 
     def check_sync(self):
-        self.root.after(10000, self.check_sync)
+        self._schedule(10000, self.check_sync)
         if not self.auto_sync.get() or not self.scan_folders or self.importing or self.sync_scanning:
             return
         if self.sync_pending:
@@ -534,13 +581,13 @@ class InvoiceApp:
             except Exception as error:
                 self.sync_results.put((folders, ({}, {'扫描': f'{type(error).__name__}：{error}'})))
         threading.Thread(target=worker, daemon=True).start()
-        self.root.after(100, self.poll_sync)
+        self._schedule(100, self.poll_sync)
 
     def poll_sync(self):
         try:
             folders, (files, errors) = self.sync_results.get_nowait()
         except queue.Empty:
-            self.root.after(100, self.poll_sync)
+            self._schedule(100, self.poll_sync)
             return
         self.sync_scanning = False
         if not self.auto_sync.get() or folders != self.scan_folders:

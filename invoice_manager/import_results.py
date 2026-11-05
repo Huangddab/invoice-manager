@@ -13,6 +13,14 @@ class ImportResultWindow(tk.Toplevel):
         self.minsize(720, 400)
         self.transient(parent)
         ttk.Label(self, text=result['summary'], padding=12).pack(anchor='w')
+        controls = ttk.Frame(self, padding=12)
+        controls.pack(side='bottom', fill='x')
+        ttk.Button(controls, text='复制失败明细', command=self.copy_errors).pack(side='left')
+        ttk.Button(controls, text='重试失败项', command=self.retry_errors,
+                   state='normal' if result['errors'] else 'disabled').pack(side='left', padx=8)
+        ttk.Button(controls, text='关闭', command=self.destroy).pack(side='right')
+        self.details = tk.Text(self, height=5, wrap='word', state='disabled')
+        self.details.pack(side='bottom', fill='x', padx=12, pady=8)
         frame = ttk.Frame(self, padding=(12, 0))
         frame.pack(fill='both', expand=True)
         self.tree = ttk.Treeview(frame, columns=('file', 'status', 'reason'), show='headings', selectmode='browse')
@@ -31,15 +39,7 @@ class ImportResultWindow(tk.Toplevel):
                             key=lambda item: item[1] != '失败')
         for index, (path, status, reason) in enumerate(self.items):
             self.tree.insert('', 'end', iid=str(index), values=(Path(path).name, status, reason))
-        self.details = tk.Text(self, height=5, wrap='word', state='disabled')
-        self.details.pack(fill='x', padx=12, pady=8)
         self.tree.bind('<<TreeviewSelect>>', self.show_selected)
-        controls = ttk.Frame(self, padding=12)
-        controls.pack(fill='x')
-        ttk.Button(controls, text='复制失败明细', command=self.copy_errors).pack(side='left')
-        ttk.Button(controls, text='重试失败项', command=self.retry_errors,
-                   state='normal' if result['errors'] else 'disabled').pack(side='left', padx=8)
-        ttk.Button(controls, text='关闭', command=self.destroy).pack(side='right')
         if self.items:
             self.tree.selection_set('0')
             self.show_selected()

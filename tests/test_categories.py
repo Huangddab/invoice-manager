@@ -29,11 +29,14 @@ class CategoryTests(unittest.TestCase):
 
     def tearDown(self):
         database.DB_PATH = self.previous
+        gc.collect()
         self.temp.cleanup()
 
-    def add(self, number, amount, category):
+    def add(self, number, amount, category, buyer=None):
         invoice = parse_invoice(self.pdf)
         invoice.update(invoice_number=number, total_amount=Decimal(amount), category=category)
+        if buyer is not None:
+            invoice['buyer'] = buyer
         database.save_invoice(invoice)
 
     def app(self):
@@ -91,6 +94,21 @@ class CategoryTests(unittest.TestCase):
         rows = select_invoice_combination(database.list_invoices(), 5000)
         self.assertEqual([row['invoice_number'] for row in rows], ['meal'])
 
+    def test_reimbursement_keeps_companies_separate(self):
+        self.add('company-a', '50', 'meal', '公司甲')
+        self.add('company-b', '50', 'meal', '公司乙')
+        with self.assertRaisesRegex(ValueError, '同一购买方'):
+            database.create_reimbursement_batch('2026-10', 2, 2500, ['company-a', 'company-b'])
+        root, app = self.app()
+        app.workflow.company.set('公司乙')
+        app.days.set('2')
+        app.workflow.generate()
+        self.assertEqual([row['invoice_number'] for row in app.workflow.batch_view.rows], ['company-b'])
+        states = {row['invoice_number']: row['status'] for row in database.list_invoices()}
+        self.assertEqual(states, {'company-a': 'available', 'company-b': 'reserved'})
+        app.buyer_filter.set('公司甲')
+        self.assertEqual(app.table.get_children(), ('company-a',))
+
     def test_combined_monthly_flow_and_export_target(self):
         self.add('meal', '49', 'meal')
         self.add('other', '80', 'other')
@@ -108,7 +126,7 @@ class CategoryTests(unittest.TestCase):
         view = app.workflow.batch_view
         batch = database.list_reimbursement_batches()[0]
         self.assertEqual((batch['other_amount_fen'], batch['total_amount_fen']), (8000, 12900))
-        self.assertEqual(app.history.tree.item(str(batch['id']), 'values')[3], '130.00')
+        self.assertEqual(app.history.tree.item(str(batch['id']), 'values')[4], '130.00')
         destination = Path(self.temp.name) / 'exports'
         with patch('invoice_manager.batch_view.filedialog.askdirectory', return_value=str(destination)):
             view.export()

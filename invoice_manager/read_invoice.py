@@ -36,9 +36,6 @@ def extract_invoice_identity(text):
     return (match.group(1), "", match.group(1)) if match else (None, "", "")
 
 
-def extract_invoice_number(text):
-    return extract_invoice_identity(text)[0]
-
 # 解析价税总价
 def extract_total_amount(text):
     labelled = re.search(r"[（(]\s*小\s*写\s*[）)]\s*[¥￥]\s*([0-9,]+\.[0-9]{2})(?![0-9])", text)

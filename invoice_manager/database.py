@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 
 from datetime import datetime
 from invoice_manager.runtime_paths import data_directory
@@ -50,6 +51,8 @@ def init_db():
         batch_columns = {row[1] for row in conn.execute("PRAGMA table_info(reimbursement_batches)")}
         if 'other_amount_fen' not in batch_columns:
             conn.execute("ALTER TABLE reimbursement_batches ADD COLUMN other_amount_fen INTEGER NOT NULL DEFAULT 0")
+        if 'manual_target_fen' not in batch_columns:
+            conn.execute("ALTER TABLE reimbursement_batches ADD COLUMN manual_target_fen INTEGER")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS reimbursement_items (
                 batch_id INTEGER NOT NULL,
@@ -163,25 +166,6 @@ def update_remark(invoice_number,remark):
     finally:
         conn.close()
 
-# 更新发票打印状态
-def update_printed(invoice_number,is_printed):
-    if type(is_printed) is not bool:
-        raise ValueError("打印状态必须是True或False")
-
-    conn  =sqlite3.connect(DB_PATH)
-
-    try:
-        cursor = conn.execute("""
-            UPDATE invoices
-            SET is_printed = ?
-            WHERE invoice_number = ?
-        """, (int(is_printed), invoice_number))
-
-        conn.commit()
-        return cursor.rowcount == 1
-    finally:
-        conn.close()
-
 # 批量更新发票打印状态
 def update_printed_batch(invoice_numbers, is_printed):
     if type(is_printed) is not bool:
@@ -210,7 +194,7 @@ def update_status_batch(invoice_numbers, status):
     if status not in ("available", "reserved", "used", "unusable"):
         raise ValueError("无效的使用状态")
     numbers = list(dict.fromkeys(invoice_numbers))
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
         for number in numbers:
             current = conn.execute("SELECT status FROM invoices WHERE invoice_number = ?", (number,)).fetchone()
@@ -231,21 +215,6 @@ def update_status_batch(invoice_numbers, status):
             raise ValueError("部分发票不存在，请刷新后重试")
     return True
 
-# 获取发票对应的文件路径
-def get_invoice_file_path(invoice_number):
-    conn = sqlite3.connect(DB_PATH)
-
-    try:
-        row = conn.execute("""
-            SELECT file_path
-            FROM invoices
-            WHERE invoice_number = ?
-        """, (invoice_number,)).fetchone()
-
-        return row[0] if row else None
-    finally:
-        conn.close()
-
 # 创建报销批次及其对应的发票项
 def create_reimbursement_batch(
     reimbursement_month,
@@ -253,6 +222,8 @@ def create_reimbursement_batch(
     daily_allowance_fen,
     invoice_numbers,
     expected_categories=None,
+    expected_buyer=None,
+    manual_target_fen=None,
 ):
     # 检查月份格式
     try:
@@ -271,6 +242,8 @@ def create_reimbursement_batch(
         or daily_allowance_fen < 0
     ):
         raise ValueError("每日标准必须是非负整数，单位为分")
+    if manual_target_fen is not None and (type(manual_target_fen) is not int or not 0 <= manual_target_fen <= 9223372036854775807):
+        raise ValueError('直接输入的报销金额必须是非负金额，且最多两位小数')
 
     # 去掉重复号码，同时保留原顺序
     invoice_numbers = list(dict.fromkeys(invoice_numbers))
@@ -289,22 +262,29 @@ def create_reimbursement_batch(
             INSERT INTO reimbursement_batches (
                 reimbursement_month,
                 work_days,
-                daily_allowance_fen
+                daily_allowance_fen,
+                manual_target_fen
             )
-            VALUES (?, ?, ?)
+            VALUES (?, ?, ?, ?)
         """, (
             reimbursement_month,
             work_days,
             daily_allowance_fen,
+            manual_target_fen,
         ))
 
         batch_id = cursor.lastrowid
         # 遍历发票号码，更新发票状态并插入报销项记录
         other_amount = 0
+        batch_buyer = None
         for invoice_number in invoice_numbers:
-            invoice = conn.execute('SELECT category, total_amount_fen FROM invoices WHERE invoice_number = ?', (invoice_number,)).fetchone()
+            invoice = conn.execute('SELECT category, total_amount_fen, buyer FROM invoices WHERE invoice_number = ?', (invoice_number,)).fetchone()
             if invoice and expected_categories is not None and invoice[0] != expected_categories.get(invoice_number):
                 raise ValueError('发票分类已变更，请重新生成报销单')
+            if invoice:
+                if (expected_buyer is not None and invoice[2] != expected_buyer) or (batch_buyer is not None and invoice[2] != batch_buyer):
+                    raise ValueError('一张报销单只能使用同一购买方公司的发票')
+                batch_buyer = invoice[2]
             if invoice and invoice[0] == 'other':
                 other_amount += invoice[1]
             cursor = conn.execute("""
@@ -340,10 +320,11 @@ def create_reimbursement_batch(
 
 
 def list_reimbursement_batches():
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn, conn:
         conn.row_factory = sqlite3.Row
         return [dict(row) for row in conn.execute("""
-            SELECT b.*, COUNT(i.invoice_number) AS invoice_count,
+            SELECT b.*, MIN(v.buyer) AS buyer, COUNT(i.invoice_number) AS invoice_count,
+                   COALESCE(b.manual_target_fen, b.work_days * b.daily_allowance_fen) + COALESCE(b.other_amount_fen, 0) AS target_amount_fen,
                    COALESCE(SUM(v.total_amount_fen), 0) AS total_amount_fen
             FROM reimbursement_batches b
             LEFT JOIN reimbursement_items i ON i.batch_id = b.id
@@ -356,7 +337,7 @@ def finish_reimbursement_batch(batch_id, action):
     """Complete or cancel a reserved batch atomically."""
     if action not in ('used', 'cancelled'):
         raise ValueError('无效的报销操作')
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn, conn:
         conn.execute('BEGIN IMMEDIATE')
         row = conn.execute('SELECT status FROM reimbursement_batches WHERE id = ?', (batch_id,)).fetchone()
         if not row or row[0] != 'reserved':
@@ -377,12 +358,12 @@ def finish_reimbursement_batch(batch_id, action):
 
 
 def relink_invoice_file(number, path):
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn, conn:
         conn.execute("UPDATE invoices SET file_path = ? WHERE invoice_number = ?", (path, number))
 
 
 def reimbursement_invoices(batch_id):
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn, conn:
         conn.row_factory = sqlite3.Row
         return [dict(row) for row in conn.execute("""
             SELECT v.* FROM invoices v JOIN reimbursement_items i
@@ -397,7 +378,7 @@ def update_category_batch(invoice_numbers, category):
     numbers = list(dict.fromkeys(invoice_numbers))
     if not numbers:
         raise ValueError('请先选择发票')
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn, conn:
         conn.execute('BEGIN IMMEDIATE')
         for number in numbers:
             row = conn.execute('SELECT status FROM invoices WHERE invoice_number = ?', (number,)).fetchone()
@@ -414,7 +395,7 @@ def delete_invoices(invoice_numbers):
     numbers = list(dict.fromkeys(invoice_numbers))
     if not numbers:
         raise ValueError('请先选择发票')
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn, conn:
         conn.execute('PRAGMA foreign_keys = ON')
         conn.execute('BEGIN IMMEDIATE')
         blocked = []

@@ -68,7 +68,8 @@ class WindowsBuildTests(unittest.TestCase):
         interpreter = tk.Tcl()
         if not interpreter.call('info', 'commands', 'zipfs'):
             self.skipTest('zipfs requires Tcl 9')
-        with tempfile.TemporaryDirectory() as temporary:
+        # Tcl 9 zipfs misreads some Windows user-profile temp paths.
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as temporary:
             root = Path(temporary)
             archive = root / 'libraries.zip'
             with zipfile.ZipFile(archive, 'w') as output:

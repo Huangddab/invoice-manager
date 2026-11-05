@@ -33,7 +33,25 @@ class OutputTests(unittest.TestCase):
 
     def tearDown(self):
         database.DB_PATH = self.old_db
+        gc.collect()
         self.temp.cleanup()
+
+    def test_printed_invoices_start_unchecked_and_can_be_selected(self):
+        database.update_printed_batch([self.number], True)
+        _, view = self.make_view()
+        self.assertEqual(view.checked, set())
+        view.check_all(True)
+        self.assertEqual(view.checked, {self.number})
+        view.check_unprinted()
+        self.assertEqual(view.checked, set())
+
+    def test_confirmed_print_is_unchecked(self):
+        _, view = self.make_view()
+        self.assertEqual(view.checked, {self.number})
+        with patch('tkinter.messagebox.askyesno', return_value=True):
+            view.confirm_print_result([self.number])
+        self.assertEqual(view.checked, set())
+        self.assertEqual(database.list_invoices()[0]['is_printed'], 1)
 
     def test_managed_original_and_renamed_duplicate(self):
         managed = original_path(self.rows[0])
@@ -98,15 +116,15 @@ class OutputTests(unittest.TestCase):
     def test_print_confirmation_uses_last_submitted_selection(self):
         root, view = self.make_view()
         with patch('invoice_manager.batch_view.print_command', return_value=['mock']), \
-             patch('invoice_manager.batch_view.submit_print'):
+             patch('invoice_manager.batch_view.submit_print'), \
+             patch('invoice_manager.batch_view.messagebox.askyesno', return_value=True) as dialog:
             view.print_checked()
+            view.check_all(False)
             deadline = time.monotonic() + 5
             while view.busy and time.monotonic() < deadline:
                 root.update()
                 time.sleep(0.01)
-        view.check_all(False)
-        with patch('tkinter.messagebox.askyesno', return_value=True):
-            view.mark_printed()
+            dialog.assert_called_once()
         self.assertEqual(database.list_invoices()[0]['is_printed'], 1)
 
     def test_print_copy_preserves_original_size_text_and_annotations(self):
@@ -221,10 +239,10 @@ class OutputTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertFalse(view.busy)
             self.assertIsNone(view.pending_print)
-            dialog.assert_not_called()
-            self.assertEqual(database.list_invoices()[0]['is_printed'], 0)
             if submit_error is None:
-                view.mark_printed()
+                dialog.assert_called_once()
+            else:
+                dialog.assert_not_called()
             return dialog.called
 
     def test_print_requires_actual_success_confirmation(self):
@@ -233,6 +251,20 @@ class OutputTests(unittest.TestCase):
         self.run_print(True)
         self.assertEqual(database.list_invoices()[0]['is_printed'], 1)
         self.assertEqual(database.list_invoices()[0]['status'], 'reserved')
+
+    def test_automatic_prompt_no_keeps_print_state(self):
+        root, view = self.make_view()
+        with patch('invoice_manager.batch_view.print_command', return_value=['mock']), \
+             patch('invoice_manager.batch_view.submit_print'), \
+             patch('invoice_manager.batch_view.messagebox.askyesno', return_value=False) as dialog:
+            view.print_checked()
+            deadline = time.monotonic() + 5
+            while view.busy and time.monotonic() < deadline:
+                root.update()
+                time.sleep(0.01)
+            self.assertEqual(database.list_invoices()[0]['is_printed'], 0)
+            dialog.assert_called_once()
+            self.assertFalse(hasattr(view, 'mark_print_button'))
 
     def test_print_failure_never_requests_success_or_marks_printed(self):
         has_confirmation = self.run_print(True, RuntimeError('cancelled or failed'))
